@@ -27,3 +27,9 @@ npm run dev
 |------|------|
 | `sheyan-ai/` | 主应用（Next.js 16） |
 | `docs/` | 开发文档 |
+| `docs/DEPLOY_VERCEL.md` | **Vercel 上线步骤** |
+
+## Vercel 部署
+
+项目已关联 Vercel：`luyao-s-projects/mid-gpt`  
+**还差一步**：在 Vercel 接入 Neon 数据库并配置 `DATABASE_URL`，详见 [docs/DEPLOY_VERCEL.md](./docs/DEPLOY_VERCEL.md)。
