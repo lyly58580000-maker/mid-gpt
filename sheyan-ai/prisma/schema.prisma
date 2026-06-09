@@ -1,0 +1,154 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  USER
+  ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  DISABLED
+}
+
+enum MessageRole {
+  user
+  assistant
+  system
+}
+
+enum ContentType {
+  text
+  image
+}
+
+enum UsageType {
+  text
+  image
+}
+
+enum UsageStatus {
+  pending
+  success
+  failed
+  refunded
+}
+
+enum BalanceChangeType {
+  recharge
+  consume
+  refund
+  admin_adjust
+  system_gift
+}
+
+model User {
+  id           String     @id @default(cuid())
+  email        String     @unique
+  passwordHash String
+  nickname     String?
+  avatar       String?
+  balance      Int        @default(0)
+  tags         String?
+  role         UserRole   @default(USER)
+  status       UserStatus @default(ACTIVE)
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+  lastLoginAt  DateTime?
+
+  groups         ChatGroup[]
+  conversations  Conversation[]
+  usageRecords   UsageRecord[]
+  balanceRecords BalanceRecord[]
+}
+
+model ChatGroup {
+  id        String   @id @default(cuid())
+  userId    String
+  name      String
+  sortOrder Int      @default(0)
+  isDefault Boolean  @default(false)
+  status    String   @default("active")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  conversations Conversation[]
+}
+
+model Conversation {
+  id        String   @id @default(cuid())
+  userId    String
+  groupId   String
+  title     String   @default("新对话")
+  status    String   @default("active")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  group    ChatGroup @relation(fields: [groupId], references: [id])
+  messages Message[]
+}
+
+model Message {
+  id             String      @id @default(cuid())
+  conversationId String
+  userId         String
+  role           MessageRole
+  contentType    ContentType @default(text)
+  content        String
+  imageUrl       String?
+  attachments    String?
+  createdAt      DateTime    @default(now())
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+}
+
+model UsageRecord {
+  id             String      @id @default(cuid())
+  userId         String
+  conversationId String?
+  messageId      String?
+  usageType      UsageType
+  modelName      String
+  inputTokens    Int?
+  outputTokens   Int?
+  totalTokens    Int?
+  costPoints     Int
+  estimatedCost  Float?
+  actualCost     Float?
+  status         UsageStatus
+  errorMessage   String?
+  responseMs     Int?
+  createdAt      DateTime    @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model BalanceRecord {
+  id             String            @id @default(cuid())
+  userId         String
+  changeType     BalanceChangeType
+  amount         Int
+  balanceBefore  Int
+  balanceAfter   Int
+  relatedUsageId String?
+  remark         String?
+  createdAt      DateTime          @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model SystemConfig {
+  id          String   @id @default(cuid())
+  configKey   String   @unique
+  configValue String
+  description String?
+  updatedAt   DateTime @updatedAt
+}

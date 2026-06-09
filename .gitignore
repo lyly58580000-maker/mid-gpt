@@ -1,0 +1,39 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.log
+
+# Local scratch / extracted docs (not needed in repo)
+prd_extracted.txt
+ai.tsx
+
+# Cursor / local assets
+assets/
+.agent/
+agent-transcripts/
+
+# Env secrets (never commit)
+.env
+.env.*
+**/.env
+**/.env.*
+!.env.example
+!**/.env.example
+
+# Node / Next.js (sheyan-ai)
+sheyan-ai/node_modules/
+sheyan-ai/.next/
+sheyan-ai/out/
+sheyan-ai/build/
+sheyan-ai/.vercel/
+sheyan-ai/*.tsbuildinfo
+sheyan-ai/next-env.d.ts
+
+# Database & generated media
+sheyan-ai/prisma/dev.db
+sheyan-ai/prisma/dev.db-journal
+sheyan-ai/public/generated/
+sheyan-ai/public/uploads/
