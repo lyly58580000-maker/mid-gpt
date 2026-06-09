@@ -155,6 +155,8 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
   const dragCounterRef = useRef(0);
   const abortControllerRef = useRef<AbortController | null>(null);
   const sendingRef = useRef(false);
+  const conversationLoadIdRef = useRef(0);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const loadGroups = async () => {
     const res = await fetch("/api/groups");
@@ -178,8 +180,10 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
   };
 
   const loadConversation = async (id: string) => {
+    const loadId = ++conversationLoadIdRef.current;
     const res = await fetch(`/api/conversations/${id}`);
     const data = await res.json();
+    if (loadId !== conversationLoadIdRef.current) return;
     if (data.messages) {
       setMessages(
         data.messages
@@ -254,12 +258,24 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
   }, []);
 
   const handleNewChat = () => {
-    if (sendingRef.current) return;
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
+    sendingRef.current = false;
+    setIsGenerating(false);
+    conversationLoadIdRef.current += 1;
+
     setActiveChat(null);
     setMessages([]);
+    setInput("");
     setPendingAttachments([]);
     setErrorHint("");
-    router.replace("/chat");
+    setTruncateFromMessageId(null);
+
+    if (window.location.pathname !== "/chat") {
+      router.push("/chat");
+    } else {
+      window.requestAnimationFrame(() => textareaRef.current?.focus());
+    }
   };
 
   const pickValidFiles = (files: FileList | File[]) => {
@@ -526,6 +542,7 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
         <div className="p-4">
           <h1 className="text-xl font-semibold text-gray-800 mb-4 px-2">设研ai</h1>
           <button
+            type="button"
             onClick={handleNewChat}
             className="w-full flex items-center justify-center gap-2 py-2.5 px-4 bg-white border border-gray-200 rounded-xl hover:bg-gray-50 text-sm font-medium text-gray-700"
           >
@@ -924,6 +941,7 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
                 }}
               />
               <textarea
+                ref={textareaRef}
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onPaste={handlePaste}
