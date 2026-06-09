@@ -87,10 +87,14 @@ git push origin main
 
 ### 手动部署
 
-```bash
-cd sheyan-ai
+> **注意**：Vercel 的 Root Directory 已设为 `sheyan-ai` 时，必须在**仓库根目录**执行，不要在 `sheyan-ai` 里执行（否则会报 `sheyan-ai/sheyan-ai` 路径不存在）。
+
+```powershell
+cd E:\桌面\codex\mid-gpt2
 npx vercel deploy --prod
 ```
+
+或双击运行根目录的 `deploy.ps1`。
 
 ---
 

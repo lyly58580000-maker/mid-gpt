@@ -54,7 +54,7 @@ export async function generateImage(prompt: string): Promise<{ url: string; mode
   const client = getImageClient();
   const primaryModel = process.env.IMAGE_MODEL_NAME ?? "gpt-image-2";
   const fallbackModel = process.env.IMAGE_FALLBACK_MODEL?.trim();
-  const models = [...new Set([primaryModel, fallbackModel].filter(Boolean))];
+  const models = [...new Set([primaryModel, fallbackModel].filter((m): m is string => Boolean(m)))];
   const size = (process.env.IMAGE_SIZE ?? "1024x1024") as "1024x1024";
   const maxAttempts = 3;
 
@@ -74,7 +74,8 @@ export async function generateImage(prompt: string): Promise<{ url: string; mode
         if (!item) throw new Error("未返回图片数据");
 
         if (item.url) {
-          const url = isVercelRuntime() ? item.url : await persistImage(item.url, prompt);
+          const sourceUrl = item.url;
+          const url = isVercelRuntime() ? sourceUrl : await persistImage(sourceUrl, prompt);
           return { url, model };
         }
 

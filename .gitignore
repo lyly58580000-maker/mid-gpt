@@ -37,3 +37,5 @@ sheyan-ai/prisma/dev.db
 sheyan-ai/prisma/dev.db-journal
 sheyan-ai/public/generated/
 sheyan-ai/public/uploads/
+
+.vercel
