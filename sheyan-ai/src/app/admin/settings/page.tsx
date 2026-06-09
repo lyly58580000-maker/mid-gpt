@@ -10,7 +10,14 @@ const LABELS: Record<string, string> = {
   maintenance_mode: "系统维护模式",
   text_charge_points: "文本扣点",
   image_charge_points: "生图扣点",
+  register_welcome_points: "新用户注册赠送",
 };
+
+const NUMERIC_KEYS = new Set([
+  "text_charge_points",
+  "image_charge_points",
+  "register_welcome_points",
+]);
 
 export default function SettingsPage() {
   const [configs, setConfigs] = useState<{ configKey: string; configValue: string }[]>([]);
@@ -35,6 +42,16 @@ export default function SettingsPage() {
     load();
   };
 
+  const saveNumber = async (key: string, value: string) => {
+    const n = Math.max(0, Math.floor(Number(value) || 0));
+    await fetch("/api/admin/settings", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ configs: { [key]: String(n) } }),
+    });
+    load();
+  };
+
   return (
     <div className="max-w-3xl bg-white rounded-2xl border divide-y">
       {configs.map((c) => (
@@ -43,8 +60,18 @@ export default function SettingsPage() {
             <h4 className="font-medium">{LABELS[c.configKey] ?? c.configKey}</h4>
             <p className="text-sm text-gray-500 mt-1">{c.configKey}</p>
           </div>
-          {c.configKey.includes("charge") ? (
-            <span className="text-sm font-medium">{c.configValue} 点</span>
+          {NUMERIC_KEYS.has(c.configKey) ? (
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                min={0}
+                defaultValue={c.configValue}
+                key={`${c.configKey}-${c.configValue}`}
+                onBlur={(e) => saveNumber(c.configKey, e.target.value)}
+                className="w-20 px-2 py-1 text-sm border rounded-lg text-right"
+              />
+              <span className="text-sm text-gray-500">点</span>
+            </div>
           ) : (
             <button
               onClick={() => toggle(c.configKey, c.configValue)}

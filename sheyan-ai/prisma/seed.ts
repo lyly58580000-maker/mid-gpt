@@ -11,6 +11,7 @@ const DEFAULT_CONFIGS = [
   { configKey: "maintenance_mode", configValue: "false", description: "维护模式" },
   { configKey: "text_charge_points", configValue: "1", description: "文本扣点" },
   { configKey: "image_charge_points", configValue: "5", description: "生图扣点" },
+  { configKey: "register_welcome_points", configValue: "20", description: "新用户注册赠送点数" },
 ];
 
 async function upsertUser(

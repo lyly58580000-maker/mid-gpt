@@ -3,8 +3,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { attachSessionCookie, createSessionToken } from "@/lib/auth";
 import { jsonError } from "@/lib/api-response";
-import { getConfigBool } from "@/lib/system-config";
+import { getConfigBool, getConfigInt } from "@/lib/system-config";
 import { AppError } from "@/lib/billing";
+import { BalanceChangeType } from "@prisma/client";
 
 export async function POST(req: NextRequest) {
   try {
@@ -26,18 +27,37 @@ export async function POST(req: NextRequest) {
     const existing = await prisma.user.findUnique({ where: { email: normalizedEmail } });
     if (existing) throw new AppError("EMAIL_EXISTS", "该邮箱已注册，请直接登录", 409);
 
+    const welcomePoints = await getConfigInt("register_welcome_points", 20);
     const passwordHash = await bcrypt.hash(password, 12);
-    const user = await prisma.user.create({
-      data: {
-        email: normalizedEmail,
-        passwordHash,
-        nickname: nickname?.trim() || normalizedEmail.split("@")[0],
-        balance: 0,
-      },
-    });
 
-    await prisma.chatGroup.create({
-      data: { userId: user.id, name: "默认分组", isDefault: true, sortOrder: 0 },
+    const user = await prisma.$transaction(async (tx) => {
+      const created = await tx.user.create({
+        data: {
+          email: normalizedEmail,
+          passwordHash,
+          nickname: nickname?.trim() || normalizedEmail.split("@")[0],
+          balance: welcomePoints,
+        },
+      });
+
+      if (welcomePoints > 0) {
+        await tx.balanceRecord.create({
+          data: {
+            userId: created.id,
+            changeType: BalanceChangeType.system_gift,
+            amount: welcomePoints,
+            balanceBefore: 0,
+            balanceAfter: welcomePoints,
+            remark: "新用户注册赠送",
+          },
+        });
+      }
+
+      await tx.chatGroup.create({
+        data: { userId: created.id, name: "默认分组", isDefault: true, sortOrder: 0 },
+      });
+
+      return created;
     });
 
     const token = await createSessionToken({
@@ -56,6 +76,7 @@ export async function POST(req: NextRequest) {
           role: user.role,
           balance: user.balance,
         },
+        welcomePoints,
         redirectTo: "/chat",
       }),
       token,

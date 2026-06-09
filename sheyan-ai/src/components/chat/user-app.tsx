@@ -23,6 +23,7 @@ import {
   FileText,
   Square,
   ChevronDown,
+  RefreshCw,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { MarkdownMessage } from "@/components/chat/markdown-message";
@@ -128,7 +129,7 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
   const [activeChat, setActiveChat] = useState<string | null>(initialConversationId ?? null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
-  const [isGenerating, setIsGenerating] = useState(false);
+  const [generatingIds, setGeneratingIds] = useState<Set<string>>(() => new Set());
   const [balance, setBalance] = useState(0);
   const [userName, setUserName] = useState("用户");
   const [modal, setModal] = useState<string | null>(null);
@@ -144,19 +145,45 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
   const [renameChatTarget, setRenameChatTarget] = useState<Chat | null>(null);
   const [chatTitleInput, setChatTitleInput] = useState("");
   const [errorHint, setErrorHint] = useState("");
+  const [welcomeHint, setWelcomeHint] = useState("");
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [truncateFromMessageId, setTruncateFromMessageId] = useState<string | null>(null);
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
   const [isDragging, setIsDragging] = useState(false);
   const [showScrollBottom, setShowScrollBottom] = useState(false);
+  const [loadingConversation, setLoadingConversation] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const chatScrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dragCounterRef = useRef(0);
-  const abortControllerRef = useRef<AbortController | null>(null);
-  const sendingRef = useRef(false);
+  const generatingIdsRef = useRef<Set<string>>(new Set());
+  const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
+  const activeChatRef = useRef<string | null>(activeChat);
   const conversationLoadIdRef = useRef(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  const NEW_CHAT_KEY = "__new__";
+  const chatSessionKey = (id: string | null) => id ?? NEW_CHAT_KEY;
+  const activeSessionKey = chatSessionKey(activeChat);
+  const isActiveChatGenerating = generatingIds.has(activeSessionKey);
+
+  const syncGeneratingState = () => {
+    setGeneratingIds(new Set(generatingIdsRef.current));
+  };
+
+  const markGenerating = (key: string) => {
+    generatingIdsRef.current.add(key);
+    syncGeneratingState();
+  };
+
+  const unmarkGenerating = (key: string) => {
+    generatingIdsRef.current.delete(key);
+    syncGeneratingState();
+  };
+
+  useEffect(() => {
+    activeChatRef.current = activeChat;
+  }, [activeChat]);
 
   const loadGroups = async () => {
     const res = await fetch("/api/groups");
@@ -179,14 +206,32 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
     }
   };
 
+  const getChatIdFromPath = () => {
+    if (typeof window === "undefined") return initialConversationId ?? null;
+    const match = window.location.pathname.match(/^\/chat\/([^/]+)$/);
+    return match?.[1] ?? null;
+  };
+
+  const syncChatUrl = (id: string | null) => {
+    const next = id ? `/chat/${id}` : "/chat";
+    if (window.location.pathname !== next) {
+      window.history.replaceState(null, "", next);
+    }
+  };
+
   const loadConversation = async (id: string) => {
     const loadId = ++conversationLoadIdRef.current;
-    const res = await fetch(`/api/conversations/${id}`);
-    const data = await res.json();
-    if (loadId !== conversationLoadIdRef.current) return;
-    if (data.messages) {
+    setLoadingConversation(true);
+    try {
+      const res = await fetch(`/api/conversations/${id}`);
+      const data = await res.json();
+      if (loadId !== conversationLoadIdRef.current) return;
+      if (!res.ok) {
+        setErrorHint(data.error?.message ?? "加载对话失败");
+        return;
+      }
       setMessages(
-        data.messages
+        (data.messages ?? [])
           .filter((m: Message) => m.role === "user" || m.content?.trim() || m.imageUrl)
           .map((m: Message & { attachments?: MessageAttachment[] | string | null }) => ({
             id: m.id,
@@ -201,23 +246,58 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
                 ),
           })),
       );
+      setErrorHint("");
+    } finally {
+      if (loadId === conversationLoadIdRef.current) {
+        setLoadingConversation(false);
+      }
     }
   };
 
   const selectChat = (id: string) => {
-    if (sendingRef.current) return;
+    if (activeChat === id) return;
+    conversationLoadIdRef.current += 1;
     setActiveChat(id);
+    syncChatUrl(id);
+    setErrorHint("");
+    setInput("");
+    setPendingAttachments([]);
+    setTruncateFromMessageId(null);
     loadConversation(id);
-    router.replace(`/chat/${id}`);
   };
 
   useEffect(() => {
     loadGroups();
     loadBalance();
-    if (initialConversationId) {
-      loadConversation(initialConversationId);
+
+    const bonus = sessionStorage.getItem("welcome_bonus");
+    if (bonus) {
+      sessionStorage.removeItem("welcome_bonus");
+      setWelcomeHint(`欢迎加入设研AI！已赠送 ${bonus} 点体验额度，快去试试吧`);
+      window.setTimeout(() => setWelcomeHint(""), 8000);
     }
-  }, [initialConversationId]);
+
+    const urlId = getChatIdFromPath();
+    const startId = urlId ?? initialConversationId ?? null;
+    if (startId) {
+      setActiveChat(startId);
+      loadConversation(startId);
+    }
+
+    const onPopState = () => {
+      const id = getChatIdFromPath();
+      setActiveChat(id);
+      if (id) loadConversation(id);
+      else {
+        conversationLoadIdRef.current += 1;
+        setMessages([]);
+        setLoadingConversation(false);
+      }
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     loadChats(activeGroup);
@@ -231,7 +311,7 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
     if (!showScrollBottom) {
       scrollToBottom();
     }
-  }, [messages, isGenerating, showScrollBottom]);
+  }, [messages, isActiveChatGenerating, showScrollBottom]);
 
   useEffect(() => {
     const root = chatScrollRef.current;
@@ -245,7 +325,7 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
 
     observer.observe(target);
     return () => observer.disconnect();
-  }, [activeChat, messages.length, isGenerating]);
+  }, [activeChat, messages.length, isActiveChatGenerating]);
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -258,24 +338,16 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
   }, []);
 
   const handleNewChat = () => {
-    abortControllerRef.current?.abort();
-    abortControllerRef.current = null;
-    sendingRef.current = false;
-    setIsGenerating(false);
     conversationLoadIdRef.current += 1;
-
     setActiveChat(null);
     setMessages([]);
     setInput("");
     setPendingAttachments([]);
     setErrorHint("");
     setTruncateFromMessageId(null);
-
-    if (window.location.pathname !== "/chat") {
-      router.push("/chat");
-    } else {
-      window.requestAnimationFrame(() => textareaRef.current?.focus());
-    }
+    setLoadingConversation(false);
+    syncChatUrl(null);
+    window.requestAnimationFrame(() => textareaRef.current?.focus());
   };
 
   const pickValidFiles = (files: FileList | File[]) => {
@@ -377,7 +449,7 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
     e.stopPropagation();
     dragCounterRef.current = 0;
     setIsDragging(false);
-    if (isGenerating) return;
+    if (isActiveChatGenerating) return;
     if (e.dataTransfer.files?.length) {
       uploadFiles(e.dataTransfer.files);
     }
@@ -410,7 +482,7 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
   };
 
   const canSend =
-    !isGenerating &&
+    !isActiveChatGenerating &&
     (input.trim().length > 0 ||
       pendingAttachments.some((p) => p.uploaded && !p.error));
 
@@ -425,7 +497,7 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
   };
 
   const handleEdit = (msg: Message, index: number) => {
-    if (isGenerating) return;
+    if (isActiveChatGenerating) return;
     setInput(msg.content);
     setPendingAttachments([]);
     setMessages((prev) => prev.slice(0, index));
@@ -433,11 +505,29 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
     setErrorHint("");
   };
 
+  const handleRegenerate = (assistantIndex: number) => {
+    if (isActiveChatGenerating) return;
+    const assistantMsg = messages[assistantIndex];
+    if (assistantMsg.role !== "assistant") return;
+
+    let userMsg: Message | null = null;
+    for (let i = assistantIndex - 1; i >= 0; i--) {
+      if (messages[i].role === "user") {
+        userMsg = messages[i];
+        break;
+      }
+    }
+    if (!userMsg) return;
+
+    setMessages((prev) => prev.slice(0, assistantIndex - 1));
+    setTruncateFromMessageId(userMsg.id.startsWith("temp-") ? null : userMsg.id);
+    setErrorHint("");
+    handleSend(userMsg.content);
+  };
+
   const handleStop = () => {
-    abortControllerRef.current?.abort();
-    abortControllerRef.current = null;
-    setIsGenerating(false);
-    sendingRef.current = false;
+    const key = chatSessionKey(activeChatRef.current);
+    abortControllersRef.current.get(key)?.abort();
   };
 
   const handleSend = async (text: string) => {
@@ -445,7 +535,12 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
       .filter((p) => p.uploaded && !p.error)
       .map((p) => p.uploaded!);
 
-    if ((!text.trim() && readyAttachments.length === 0) || isGenerating) return;
+    const chatAtStart = activeChatRef.current;
+    let sessionKey = chatSessionKey(chatAtStart);
+
+    if ((!text.trim() && readyAttachments.length === 0) || generatingIdsRef.current.has(sessionKey)) {
+      return;
+    }
     if (pendingAttachments.some((p) => p.uploading)) {
       setErrorHint("请等待附件上传完成");
       return;
@@ -464,8 +559,7 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
       attachments: readyAttachments,
     };
     setMessages((prev) => [...prev, userMsg]);
-    setIsGenerating(true);
-    sendingRef.current = true;
+    markGenerating(sessionKey);
 
     const editingFromId = truncateFromMessageId;
     setTruncateFromMessageId(null);
@@ -473,7 +567,7 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
     setInput("");
 
     const controller = new AbortController();
-    abortControllerRef.current = controller;
+    abortControllersRef.current.set(sessionKey, controller);
 
     try {
       const res = await fetch("/api/chat", {
@@ -482,43 +576,79 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
         signal: controller.signal,
         body: JSON.stringify({
           message: text.trim(),
-          conversationId: activeChat,
+          conversationId: chatAtStart,
           groupId: activeGroup,
           attachments: readyAttachments,
           ...(editingFromId ? { truncateFromMessageId: editingFromId } : {}),
         }),
       });
 
-      const data = await res.json().catch(() => ({}));
-
-      if (!res.ok) {
-        throw new Error((data as { error?: { message?: string } }).error?.message ?? `请求失败 (${res.status})`);
+      const raw = await res.text();
+      let data: { error?: { message?: string }; conversationId?: string } = {};
+      try {
+        data = raw ? JSON.parse(raw) : {};
+      } catch {
+        throw new Error(
+          res.ok ? "服务器响应格式异常，请刷新后重试" : `请求失败 (${res.status})，请刷新后重试`,
+        );
       }
 
-      if (data.conversationId) {
+      if (!res.ok) {
+        throw new Error(data.error?.message ?? `请求失败 (${res.status})`);
+      }
+
+      if (data.conversationId && sessionKey === NEW_CHAT_KEY) {
+        unmarkGenerating(NEW_CHAT_KEY);
+        markGenerating(data.conversationId);
+        abortControllersRef.current.delete(NEW_CHAT_KEY);
+        abortControllersRef.current.set(data.conversationId, controller);
+        sessionKey = data.conversationId;
+      }
+
+      const stillViewingSender =
+        activeChatRef.current === chatAtStart ||
+        (chatAtStart === null && activeChatRef.current === null) ||
+        (data.conversationId != null && activeChatRef.current === data.conversationId);
+
+      if (data.conversationId && stillViewingSender) {
         setActiveChat(data.conversationId);
-        router.replace(`/chat/${data.conversationId}`);
+        syncChatUrl(data.conversationId);
         await loadConversation(data.conversationId);
       }
 
       await loadChats(activeGroup);
       await loadBalance();
     } catch (err) {
+      const stillViewingSender = activeChatRef.current === chatAtStart;
+
       if (err instanceof Error && err.name === "AbortError") {
-        if (activeChat) await loadConversation(activeChat);
+        if (stillViewingSender) {
+          const reloadId = sessionKey !== NEW_CHAT_KEY ? sessionKey : chatAtStart;
+          if (reloadId) await loadConversation(reloadId);
+        }
         return;
       }
+
       const msg = err instanceof Error ? err.message : "发送失败";
-      setErrorHint(msg);
-      setMessages((prev) => prev.filter((m) => !m.id.startsWith("temp-")));
-      if (msg.includes("余额") || msg.includes("quota") || msg.includes("API")) {
-        if (msg.includes("QuickRouter") || msg.includes("API 账户")) setModal("apiQuota");
-        else setModal("noBalance");
+      if (stillViewingSender) {
+        setErrorHint(msg);
+        setMessages((prev) => prev.filter((m) => !m.id.startsWith("temp-")));
+      }
+      if (
+        msg.includes("余额") ||
+        msg.includes("quota") ||
+        msg.includes("QuickRouter") ||
+        msg.includes("API")
+      ) {
+        if (msg.includes("QuickRouter") || msg.includes("API 账户") || msg.includes("quota")) {
+          setModal("apiQuota");
+        } else {
+          setModal("noBalance");
+        }
       }
     } finally {
-      abortControllerRef.current = null;
-      setIsGenerating(false);
-      sendingRef.current = false;
+      unmarkGenerating(sessionKey);
+      abortControllersRef.current.delete(sessionKey);
     }
   };
 
@@ -630,7 +760,11 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
                   }`}
                 >
                   <div className="flex items-center gap-2 overflow-hidden flex-1" onClick={() => selectChat(chat.id)}>
-                    <MessageSquare size={16} className="text-gray-400" />
+                    {generatingIds.has(chat.id) ? (
+                      <RefreshCw size={16} className="text-indigo-500 animate-spin flex-shrink-0" />
+                    ) : (
+                      <MessageSquare size={16} className="text-gray-400 flex-shrink-0" />
+                    )}
                     <span className="text-sm truncate">{chat.title}</span>
                   </div>
                   <DropdownMenu
@@ -726,7 +860,7 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
       {/* 主聊天区 */}
       <div className="flex-1 flex flex-col h-screen bg-white relative">
         <div ref={chatScrollRef} className="flex-1 overflow-y-auto px-4 py-6 sm:px-6 lg:px-8">
-          {!activeChat && messages.length === 0 ? (
+          {!activeChat && messages.length === 0 && !loadingConversation ? (
             <div className="h-full flex flex-col items-center justify-center text-center max-w-2xl mx-auto w-full px-6">
               <div className="w-16 h-16 bg-gray-50 rounded-2xl flex items-center justify-center mb-6 border border-gray-100">
                 <span className="text-xl font-bold text-gray-800">设研ai</span>
@@ -751,7 +885,14 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
               </div>
             </div>
           ) : (
-            <div className="max-w-3xl mx-auto space-y-8 pb-32">
+            <div
+              className={`max-w-3xl mx-auto space-y-8 pb-32 transition-opacity duration-150 ${
+                loadingConversation ? "opacity-50 pointer-events-none" : ""
+              }`}
+            >
+              {loadingConversation && messages.length === 0 && (
+                <p className="text-center text-sm text-gray-400 py-8">加载对话中...</p>
+              )}
               {messages.map((msg, index) => (
                 <div key={msg.id} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
                   {msg.role === "assistant" && (
@@ -828,7 +969,7 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
                         <button
                           type="button"
                           onClick={() => handleEdit(msg, index)}
-                          disabled={isGenerating}
+                          disabled={isActiveChatGenerating}
                           className="flex items-center gap-1 px-2 py-1 text-xs text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-md transition-colors disabled:opacity-40"
                           title="编辑并重新发送"
                         >
@@ -837,10 +978,40 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
                         </button>
                       </div>
                     )}
+                    {msg.role === "assistant" && (
+                      <div className="flex items-center gap-1 mt-1.5 ml-1">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleCopy(
+                              msg.id,
+                              msg.contentType === "image"
+                                ? msg.content
+                                : msg.content || "",
+                            )
+                          }
+                          className="flex items-center gap-1 px-2 py-1 text-xs text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-md transition-colors"
+                          title="复制回答"
+                        >
+                          {copiedId === msg.id ? <Check size={13} /> : <Copy size={13} />}
+                          {copiedId === msg.id ? "已复制" : "复制"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleRegenerate(index)}
+                          disabled={isActiveChatGenerating}
+                          className="flex items-center gap-1 px-2 py-1 text-xs text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-md transition-colors disabled:opacity-40"
+                          title="重新生成"
+                        >
+                          <RefreshCw size={13} />
+                          重新生成
+                        </button>
+                      </div>
+                    )}
                   </div>
                 </div>
               ))}
-              {isGenerating && (
+              {isActiveChatGenerating && (
                 <div className="flex justify-start">
                   <div className="w-8 h-8 rounded-full bg-indigo-600 flex items-center justify-center mr-3 mt-1 text-white text-[10px] font-bold flex-shrink-0">
                     ai
@@ -854,6 +1025,14 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
             </div>
           )}
         </div>
+
+        {welcomeHint && (
+          <div className="absolute bottom-28 left-0 right-0 px-4">
+            <div className="max-w-3xl mx-auto bg-green-50 text-green-800 text-sm px-4 py-3 rounded-xl border border-green-100">
+              {welcomeHint}
+            </div>
+          </div>
+        )}
 
         {errorHint && (
           <div className="absolute bottom-28 left-0 right-0 px-4">
@@ -923,7 +1102,7 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
               <button
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
-                disabled={isGenerating || pendingAttachments.length >= MAX_ATTACHMENTS}
+                disabled={isActiveChatGenerating || pendingAttachments.length >= MAX_ATTACHMENTS}
                 className="absolute left-2 bottom-2 p-2 rounded-xl text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 disabled:opacity-40"
                 title="上传图片或文档"
               >
@@ -955,7 +1134,7 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
                 className="w-full max-h-[200px] min-h-[44px] bg-transparent resize-none outline-none py-2 px-2"
                 rows={1}
               />
-              {isGenerating ? (
+              {isActiveChatGenerating ? (
                 <button
                   type="button"
                   onClick={handleStop}

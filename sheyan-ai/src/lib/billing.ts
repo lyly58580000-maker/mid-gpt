@@ -59,6 +59,29 @@ export async function refundPoints(userId: string, points: number, relatedUsageI
   });
 }
 
+export async function giftPoints(userId: string, points: number, remark: string) {
+  if (points <= 0) return null;
+
+  return prisma.$transaction(async (tx) => {
+    const user = await tx.user.findUnique({ where: { id: userId } });
+    if (!user) throw new AppError("USER_NOT_FOUND", "用户不存在", 404);
+
+    const balanceAfter = user.balance + points;
+    await tx.user.update({ where: { id: userId }, data: { balance: balanceAfter } });
+
+    return tx.balanceRecord.create({
+      data: {
+        userId,
+        changeType: BalanceChangeType.system_gift,
+        amount: points,
+        balanceBefore: user.balance,
+        balanceAfter,
+        remark,
+      },
+    });
+  });
+}
+
 export async function adminAdjustBalance(
   userId: string,
   amount: number,

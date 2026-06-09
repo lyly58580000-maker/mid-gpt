@@ -26,10 +26,14 @@ export function LoginForm({ portal }: { portal: "user" | "admin" }) {
       const data = (await res.json().catch(() => ({}))) as {
         error?: { message?: string };
         redirectTo?: string;
+        welcomePoints?: number;
       };
       if (!res.ok) throw new Error(data.error?.message ?? `登录失败 (${res.status})`);
 
       const dest = data.redirectTo ?? (portal === "admin" ? "/admin" : "/chat");
+      if (isRegister && data.welcomePoints && data.welcomePoints > 0) {
+        sessionStorage.setItem("welcome_bonus", String(data.welcomePoints));
+      }
       window.location.assign(dest);
     } catch (err) {
       setError(err instanceof Error ? err.message : "登录失败");

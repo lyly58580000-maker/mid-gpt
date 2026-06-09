@@ -10,6 +10,12 @@ export async function getConfigBool(key: string, fallback = false): Promise<bool
   return value === "true";
 }
 
+export async function getConfigInt(key: string, fallback = 0): Promise<number> {
+  const value = await getConfig(key, String(fallback));
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : fallback;
+}
+
 export async function getChargePoints(type: "text" | "image"): Promise<number> {
   const key = type === "text" ? "text_charge_points" : "image_charge_points";
   const envKey = type === "text" ? "TEXT_CHARGE_POINTS" : "IMAGE_CHARGE_POINTS";

@@ -1,5 +1,5 @@
 import { getSession } from "@/lib/auth";
-import { prisma } from "@/lib/prisma";
+import { prisma, withPrismaRetry } from "@/lib/prisma";
 import { detectIntent } from "@/lib/ai/intent";
 import { buildChatMessages, generateTextReply } from "@/lib/ai/text-provider";
 import { parseAttachments, serializeAttachments, type MessageAttachment } from "@/lib/attachments";
@@ -12,6 +12,7 @@ import {
 } from "@/lib/billing";
 import { getChargePoints, getConfigBool } from "@/lib/system-config";
 import { jsonError } from "@/lib/api-response";
+import { fetchQuickRouterQuota } from "@/lib/quickrouter-quota";
 
 export async function POST(req: Request) {
   const started = Date.now();
@@ -20,7 +21,7 @@ export async function POST(req: Request) {
   let usageRecordId: string | undefined;
 
   try {
-    const session = await getSession();
+    const session = await withPrismaRetry(() => getSession());
     if (!session) throw new Error("UNAUTHORIZED");
     userId = session.userId;
 
@@ -56,6 +57,18 @@ export async function POST(req: Request) {
 
     costPoints = await getChargePoints(isImage ? "image" : "text");
     await preDeductPoints(userId, costPoints, isImage ? "生图预扣" : "文本预扣");
+
+    if (!isImage) {
+      const apiQuota = await fetchQuickRouterQuota();
+      if (apiQuota.available && apiQuota.balance != null && apiQuota.balance <= 0) {
+        await refundPoints(userId, costPoints);
+        throw new AppError(
+          "OPENAI_QUOTA",
+          "QuickRouter API 额度已用完，请登录 quickrouter.ai 控制台充值",
+          502,
+        );
+      }
+    }
 
     let conversationId = body.conversationId ?? null;
 
@@ -180,9 +193,9 @@ export async function POST(req: Request) {
     }
 
     const history = await prisma.message.findMany({
-      where: { conversationId, role: { in: ["user", "assistant"] }, contentType: "text" },
+      where: { conversationId, role: { in: ["user", "assistant"] } },
       orderBy: { createdAt: "asc" },
-      take: 20,
+      take: 30,
     });
 
     const chatMessages = await buildChatMessages(
@@ -191,6 +204,8 @@ export async function POST(req: Request) {
         .map((m) => ({
           role: m.role as "user" | "assistant",
           content: m.content,
+          contentType: m.contentType as "text" | "image",
+          imageUrl: m.imageUrl,
           attachments: m.attachments,
         })),
       message || userMessage.content,
@@ -286,9 +301,9 @@ export async function POST(req: Request) {
     }
     if (error instanceof AppError) return jsonError(error);
     const msg = error instanceof Error ? error.message : "服务器错误";
-    if (msg.includes("quota") || msg.includes("余额不足")) {
+    if (msg.includes("quota") || msg.includes("QuickRouter") || msg.includes("余额不足")) {
       return jsonError(
-        new AppError("OPENAI_QUOTA", "API 账户余额不足，请登录 QuickRouter 控制台充值", 502),
+        new AppError("OPENAI_QUOTA", "QuickRouter API 额度不足，请登录 quickrouter.ai 控制台充值", 502),
       );
     }
     if (msg.includes("401") || msg.includes("Incorrect API key")) {

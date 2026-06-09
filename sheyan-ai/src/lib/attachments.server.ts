@@ -7,6 +7,24 @@ import {
   type ModelContentPart,
 } from "@/lib/attachments";
 
+export async function resolveImageForModel(url: string): Promise<string> {
+  if (url.startsWith("data:")) return url;
+
+  if (url.startsWith("http://") || url.startsWith("https://")) {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`无法读取图片: ${res.status}`);
+    const buffer = Buffer.from(await res.arrayBuffer());
+    const mime = res.headers.get("content-type") || "image/png";
+    return `data:${mime};base64,${buffer.toString("base64")}`;
+  }
+
+  const filePath = path.join(process.cwd(), "public", url.replace(/^\//, ""));
+  const buffer = await fs.readFile(filePath);
+  const ext = path.extname(url).slice(1).toLowerCase() || "png";
+  const mime = ext === "jpg" ? "image/jpeg" : `image/${ext}`;
+  return `data:${mime};base64,${buffer.toString("base64")}`;
+}
+
 export async function extractTextFromBuffer(buffer: Buffer, filename: string, mime: string) {
   if (!canExtractText(filename, mime)) return undefined;
   const text = buffer.toString("utf-8").trim();
@@ -26,10 +44,14 @@ export async function buildModelContentParts(
 
   for (const att of attachments) {
     if (att.kind === "image") {
-      const filePath = path.join(process.cwd(), "public", att.url.replace(/^\//, ""));
-      const buffer = await fs.readFile(filePath);
-      const b64 = buffer.toString("base64");
-      parts.push({ type: "image", image: `data:${att.mimeType};base64,${b64}` });
+      try {
+        parts.push({ type: "image", image: await resolveImageForModel(att.url) });
+      } catch {
+        parts.push({
+          type: "text",
+          text: `[图片 ${att.name} 暂时无法读取，请根据对话上下文作答]`,
+        });
+      }
       continue;
     }
 
