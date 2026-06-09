@@ -1,6 +1,7 @@
 import fs from "fs/promises";
 import path from "path";
 import OpenAI from "openai";
+import { isVercelRuntime } from "@/lib/runtime";
 
 function getImageClient() {
   return new OpenAI({
@@ -73,13 +74,15 @@ export async function generateImage(prompt: string): Promise<{ url: string; mode
         if (!item) throw new Error("未返回图片数据");
 
         if (item.url) {
-          const localUrl = await persistImage(item.url, prompt);
-          return { url: localUrl, model };
+          const url = isVercelRuntime() ? item.url : await persistImage(item.url, prompt);
+          return { url, model };
         }
 
         if (item.b64_json) {
-          const localUrl = await persistBase64(item.b64_json);
-          return { url: localUrl, model };
+          const url = isVercelRuntime()
+            ? `data:image/png;base64,${item.b64_json}`
+            : await persistBase64(item.b64_json);
+          return { url, model };
         }
 
         throw new Error("图片格式不支持");

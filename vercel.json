@@ -1,0 +1,6 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "installCommand": "cd sheyan-ai && npm install",
+  "buildCommand": "cd sheyan-ai && npm run vercel-build",
+  "outputDirectory": "sheyan-ai/.next"
+}
