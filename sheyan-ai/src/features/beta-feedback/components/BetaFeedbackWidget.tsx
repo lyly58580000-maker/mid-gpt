@@ -25,8 +25,8 @@ const PANEL_OPEN_KEY = "beta-feedback-panel-open";
 function readPanelOpen(): boolean {
   if (typeof window === "undefined") return false;
   const saved = window.localStorage.getItem(PANEL_OPEN_KEY);
-  if (saved === null) return true;
-  return saved === "true";
+  if (saved !== null) return saved === "true";
+  return window.matchMedia("(min-width: 768px)").matches;
 }
 
 export function BetaFeedbackWidget() {
@@ -135,10 +135,11 @@ export function BetaFeedbackWidget() {
         <button
           type="button"
           onClick={() => setPanelExpanded(true)}
-          className="fixed bottom-6 right-6 z-[90] flex items-center gap-2 rounded-full bg-indigo-600 px-4 py-3 text-sm font-medium text-white shadow-lg shadow-indigo-600/30 transition hover:bg-indigo-500 hover:shadow-xl"
+          aria-label="灰度反馈"
+          className="fixed z-[90] flex items-center justify-center rounded-full bg-indigo-600 text-white shadow-lg shadow-indigo-600/30 transition hover:bg-indigo-500 hover:shadow-xl top-[max(0.625rem,env(safe-area-inset-top))] right-3 h-10 w-10 md:bottom-6 md:right-6 md:top-auto md:h-auto md:w-auto md:gap-2 md:px-4 md:py-3 md:text-sm md:font-medium"
         >
           <MessageSquareWarning size={18} />
-          灰度反馈
+          <span className="hidden md:inline">灰度反馈</span>
         </button>
       )}
 
@@ -156,7 +157,7 @@ export function BetaFeedbackWidget() {
             type="button"
             onClick={() => setPanelExpanded(false)}
             className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-xs text-gray-500 hover:bg-gray-100 hover:text-gray-700"
-            title="收起到右下角"
+            title="收起"
           >
             收起
             <ChevronRight size={16} />

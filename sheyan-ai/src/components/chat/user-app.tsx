@@ -23,6 +23,7 @@ import {
   FileText,
   Square,
   ChevronDown,
+  Menu,
   RefreshCw,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
@@ -151,6 +152,7 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
   const [userName, setUserName] = useState("用户");
   const [modal, setModal] = useState<string | null>(null);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const userMenuRef = useRef<HTMLDivElement>(null);
   const [usageRecords, setUsageRecords] = useState<
     {
@@ -338,8 +340,13 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
     }
   };
 
+  const closeMobileSidebar = () => setMobileSidebarOpen(false);
+
   const selectChat = (id: string) => {
-    if (activeChat === id) return;
+    if (activeChat === id) {
+      closeMobileSidebar();
+      return;
+    }
     conversationLoadIdRef.current += 1;
     setActiveChat(id);
     syncChatUrl(id);
@@ -348,6 +355,7 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
     setPendingAttachments([]);
     setTruncateFromMessageId(null);
     loadConversation(id);
+    closeMobileSidebar();
   };
 
   useEffect(() => {
@@ -432,6 +440,7 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
     setTruncateFromMessageId(null);
     setLoadingConversation(false);
     syncChatUrl(null);
+    closeMobileSidebar();
     window.requestAnimationFrame(() => textareaRef.current?.focus());
   };
 
@@ -1046,12 +1055,37 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
     setUserMenuOpen(false);
   };
 
+  const activeChatTitle = chats.find((c) => c.id === activeChat)?.title;
+
   return (
-    <div className="flex h-screen bg-gray-50 overflow-hidden">
-      {/* 左侧边栏 */}
-      <div className="w-[280px] bg-[#F9FAFB] border-r border-gray-200 flex flex-col h-screen flex-shrink-0">
-        <div className="p-4">
-          <h1 className="text-xl font-semibold text-gray-800 mb-4 px-2">设研ai</h1>
+    <div className="flex h-[100dvh] bg-gray-50 overflow-hidden">
+      {mobileSidebarOpen && (
+        <button
+          type="button"
+          className="fixed inset-0 z-40 bg-black/40 md:hidden"
+          aria-label="关闭菜单"
+          onClick={closeMobileSidebar}
+        />
+      )}
+
+      {/* 左侧边栏：桌面常驻，手机抽屉 */}
+      <div
+        className={`fixed md:static inset-y-0 left-0 z-50 md:z-auto flex h-[100dvh] w-[min(100vw,280px)] md:w-[280px] flex-shrink-0 flex-col border-r border-gray-200 bg-[#F9FAFB] transition-transform duration-300 ease-out ${
+          mobileSidebarOpen ? "translate-x-0" : "-translate-x-full md:translate-x-0"
+        }`}
+      >
+        <div className="flex items-center justify-between p-4 md:block">
+          <h1 className="text-xl font-semibold text-gray-800 px-2 md:mb-4">设研ai</h1>
+          <button
+            type="button"
+            onClick={closeMobileSidebar}
+            className="rounded-lg p-2 text-gray-500 hover:bg-gray-100 md:hidden"
+            aria-label="关闭侧边栏"
+          >
+            <X size={20} />
+          </button>
+        </div>
+        <div className="px-4 pb-4 md:pt-0 md:-mt-2">
           <button
             type="button"
             onClick={handleNewChat}
@@ -1061,7 +1095,7 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
           </button>
         </div>
 
-        <div className="flex-1 overflow-y-auto px-3 space-y-6 scrollbar-hide">
+        <div className="flex-1 overflow-y-auto overscroll-contain px-3 space-y-6 scrollbar-hide">
           {/* 分组管理 */}
           <div>
             <div className="flex items-center justify-between px-3 mb-2">
@@ -1094,7 +1128,7 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
                     {group.id !== "all" && !group.isSystem && (
                       <DropdownMenu
                         trigger={
-                          <button className="opacity-0 group-hover:opacity-100 p-1 text-gray-400 hover:text-gray-600">
+                          <button className="p-1 text-gray-400 hover:text-gray-600 md:opacity-0 md:group-hover:opacity-100">
                             <MoreHorizontal size={14} />
                           </button>
                         }
@@ -1150,7 +1184,7 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
                   </div>
                   <DropdownMenu
                     trigger={
-                      <button className="opacity-0 group-hover:opacity-100 p-1 text-gray-400 hover:text-gray-600">
+                      <button className="p-1 text-gray-400 hover:text-gray-600 md:opacity-0 md:group-hover:opacity-100">
                         <MoreHorizontal size={14} />
                       </button>
                     }
@@ -1239,7 +1273,25 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
       </div>
 
       {/* 主聊天区 */}
-      <div className="flex-1 flex flex-col h-screen bg-white relative">
+      <div className="relative flex min-w-0 flex-1 flex-col h-[100dvh] bg-white">
+        <div className="flex flex-shrink-0 items-center gap-3 border-b border-gray-100 bg-white px-3 py-2.5 pr-14 md:hidden">
+          <button
+            type="button"
+            onClick={() => setMobileSidebarOpen(true)}
+            className="rounded-lg p-2 text-gray-600 hover:bg-gray-100"
+            aria-label="打开菜单"
+          >
+            <Menu size={20} />
+          </button>
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-sm font-semibold text-gray-900">
+              {activeChatTitle ?? "设研ai"}
+            </p>
+            {!activeChatTitle && (
+              <p className="truncate text-[11px] text-gray-400">轻触菜单查看对话</p>
+            )}
+          </div>
+        </div>
         <WorkspaceBar
           answerModes={answerModes}
           sceneTemplates={sceneTemplates}
@@ -1262,7 +1314,7 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
               </div>
               <h2 className="text-2xl font-semibold mb-2">有什么我可以帮您的？</h2>
               <p className="text-gray-500 mb-8">提问、创作文案，或输入「生成一张...」来创作图片。</p>
-              <div className="grid grid-cols-2 gap-4 w-full">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 md:gap-4 w-full">
                 <button
                   onClick={() => setInput("帮我写一段关于人工智能未来的短文")}
                   className="p-4 text-left border border-gray-200 rounded-xl hover:bg-gray-50 transition-colors text-sm text-gray-600"
@@ -1281,7 +1333,7 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
             </div>
           ) : (
             <div
-              className={`max-w-3xl mx-auto space-y-8 pb-32 transition-opacity duration-150 ${
+              className={`max-w-3xl mx-auto space-y-6 md:space-y-8 pb-36 md:pb-32 transition-opacity duration-150 ${
                 loadingConversation ? "opacity-50 pointer-events-none" : ""
               }`}
             >
@@ -1496,7 +1548,7 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
           </div>
         )}
 
-        <div className="absolute bottom-0 left-0 right-0 z-30 bg-gradient-to-t from-white via-white to-transparent pt-16 pb-6 px-4 pointer-events-none">
+        <div className="absolute bottom-0 left-0 right-0 z-30 bg-gradient-to-t from-white via-white to-transparent pt-12 md:pt-16 pb-[max(1rem,env(safe-area-inset-bottom))] md:pb-6 px-3 md:px-4 pointer-events-none">
           <div className="relative mx-auto max-w-3xl">
             {showScrollBottom && messages.length > 0 && (
               <button
@@ -1587,7 +1639,7 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
                     handleSend(input);
                   }
                 }}
-                placeholder="输入问题，或拖拽 / Ctrl+V 粘贴图片与文档..."
+                placeholder="输入问题，或粘贴图片与文档…"
                 className="w-full max-h-[200px] min-h-[44px] bg-transparent resize-none outline-none py-2 px-2"
                 rows={1}
               />

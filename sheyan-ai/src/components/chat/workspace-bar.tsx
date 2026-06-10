@@ -60,8 +60,8 @@ export function WorkspaceBar({
   const activeProject = projects.find((p) => p.id === activeProjectId);
 
   return (
-    <div className="border-b border-gray-100 bg-white/80 backdrop-blur px-4 py-2">
-      <div className="max-w-3xl mx-auto flex flex-wrap items-center gap-2 text-xs">
+    <div className="border-b border-gray-100 bg-white/80 backdrop-blur px-3 py-2 md:px-4">
+      <div className="mx-auto flex max-w-3xl flex-wrap items-center gap-1.5 md:gap-2 text-xs">
         <div className="flex items-center gap-1 rounded-lg border border-gray-200 bg-white px-2 py-1">
           <Layers size={14} className="text-indigo-500" />
           <select

@@ -317,7 +317,8 @@ export function ImageEditorModal({
       <div className="flex items-center justify-between px-4 py-3 text-white border-b border-white/10">
         <div className="flex items-center gap-2 text-sm">
           <ZoomIn size={16} />
-          <span>图片编辑 — 在要修改的区域涂抹，下方输入修改说明</span>
+          <span className="hidden sm:inline">图片编辑 — 在要修改的区域涂抹，下方输入修改说明</span>
+          <span className="sm:hidden">图片编辑</span>
         </div>
         <button
           type="button"
@@ -405,7 +406,7 @@ export function ImageEditorModal({
         </div>
       </div>
 
-      <div className="border-t border-white/10 bg-[#111] p-4">
+      <div className="border-t border-white/10 bg-[#111] p-4 pb-[max(1rem,env(safe-area-inset-bottom))]">
         <div className="max-w-3xl mx-auto flex gap-3">
           <textarea
             value={prompt}
