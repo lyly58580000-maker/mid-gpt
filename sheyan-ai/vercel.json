@@ -2,5 +2,13 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": "nextjs",
   "regions": ["hkg1"],
-  "buildCommand": "npm run vercel-build"
+  "buildCommand": "npm run vercel-build",
+  "functions": {
+    "src/app/api/chat/route.ts": {
+      "maxDuration": 300
+    },
+    "src/app/api/upload/route.ts": {
+      "maxDuration": 60
+    }
+  }
 }

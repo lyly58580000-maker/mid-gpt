@@ -19,10 +19,11 @@ function getSecret() {
 }
 
 export async function createSessionToken(payload: SessionPayload) {
+  const expiresIn = payload.role === "ADMIN" ? "1d" : "7d";
   return new SignJWT({ ...payload })
     .setProtectedHeader({ alg: "HS256" })
     .setIssuedAt()
-    .setExpirationTime("7d")
+    .setExpirationTime(expiresIn)
     .sign(getSecret());
 }
 
@@ -48,16 +49,23 @@ export async function getSessionFromRequest(req: NextRequest): Promise<SessionPa
   return verifySessionToken(token);
 }
 
-const SESSION_COOKIE_OPTIONS = {
-  httpOnly: true,
-  secure: process.env.NODE_ENV === "production",
-  sameSite: "lax" as const,
-  path: "/",
-  maxAge: 60 * 60 * 24 * 7,
-};
+function getSessionCookieOptions(role: UserRole = "USER") {
+  const maxAge = role === "ADMIN" ? 60 * 60 * 24 : 60 * 60 * 24 * 7;
+  return {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "strict" as const,
+    path: "/",
+    maxAge,
+  };
+}
 
-export function attachSessionCookie<T>(response: NextResponse<T>, token: string) {
-  response.cookies.set(SESSION_COOKIE, token, SESSION_COOKIE_OPTIONS);
+export function attachSessionCookie<T>(
+  response: NextResponse<T>,
+  token: string,
+  role: UserRole = "USER",
+) {
+  response.cookies.set(SESSION_COOKIE, token, getSessionCookieOptions(role));
   return response;
 }
 
@@ -66,9 +74,9 @@ export function detachSessionCookie<T>(response: NextResponse<T>) {
   return response;
 }
 
-export async function setSessionCookie(token: string) {
+export async function setSessionCookie(token: string, role: UserRole = "USER") {
   const cookieStore = await cookies();
-  cookieStore.set(SESSION_COOKIE, token, SESSION_COOKIE_OPTIONS);
+  cookieStore.set(SESSION_COOKIE, token, getSessionCookieOptions(role));
 }
 
 export async function clearSessionCookie() {

@@ -1,5 +1,6 @@
 import { PrismaClient, UserRole } from "@prisma/client";
 import bcrypt from "bcryptjs";
+import { ANSWER_MODES_SEED, SCENE_TEMPLATES_SEED } from "../src/lib/ai/workspace-seed-data";
 
 const prisma = new PrismaClient();
 
@@ -11,7 +12,10 @@ const DEFAULT_CONFIGS = [
   { configKey: "maintenance_mode", configValue: "false", description: "维护模式" },
   { configKey: "text_charge_points", configValue: "1", description: "文本扣点" },
   { configKey: "image_charge_points", configValue: "5", description: "生图扣点" },
-  { configKey: "register_welcome_points", configValue: "20", description: "新用户注册赠送点数" },
+  { configKey: "register_welcome_points", configValue: "15", description: "新用户注册赠送点数" },
+  { configKey: "api_cost_cny_per_1k_tokens", configValue: "0.0067", description: "每千Token API成本(元)" },
+  { configKey: "api_cost_image_cny", configValue: "0.41", description: "单次生图 API 成本(元)" },
+  { configKey: "quickrouter_recharge_discount", configValue: "0.99", description: "QuickRouter充值折扣系数(9.9折=0.99)" },
 ];
 
 async function upsertUser(
@@ -56,6 +60,36 @@ async function main() {
       where: { configKey: config.configKey },
       update: { configValue: config.configValue, description: config.description },
       create: config,
+    });
+  }
+
+  for (const mode of ANSWER_MODES_SEED) {
+    await prisma.answerMode.upsert({
+      where: { slug: mode.slug },
+      update: {
+        name: mode.name,
+        description: mode.description,
+        instruction: mode.instruction,
+        maxLengthPreference: mode.maxLengthPreference,
+        isDefault: mode.isDefault,
+      },
+      create: mode,
+    });
+  }
+
+  for (const template of SCENE_TEMPLATES_SEED) {
+    await prisma.sceneTemplate.upsert({
+      where: { slug: template.slug },
+      update: {
+        name: template.name,
+        type: template.type,
+        description: template.description,
+        systemInstruction: template.systemInstruction,
+        outputStructure: template.outputStructure,
+        isDefaultEnabled: template.isDefaultEnabled,
+        isActive: true,
+      },
+      create: { ...template, isActive: true },
     });
   }
 

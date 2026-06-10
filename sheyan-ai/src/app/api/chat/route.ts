@@ -1,9 +1,13 @@
 import { getSession } from "@/lib/auth";
 import { prisma, withPrismaRetry } from "@/lib/prisma";
-import { detectIntent } from "@/lib/ai/intent";
-import { buildChatMessages, generateTextReply } from "@/lib/ai/text-provider";
+import { resolveImageRequest } from "@/lib/ai/image-intent";
+import { createTextStream, mapApiError } from "@/lib/ai/text-provider";
+import { buildPromptContext } from "@/lib/ai/prompt-context";
+import { applyMemoryUpdates } from "@/lib/ai/memory-extractor";
 import { parseAttachments, serializeAttachments, type MessageAttachment } from "@/lib/attachments";
+import { maskPreviewAttachment } from "@/lib/attachments-preview.server";
 import { generateImage } from "@/lib/ai/image-provider";
+import { logImage } from "@/lib/ai/image-logger";
 import {
   AppError,
   preDeductPoints,
@@ -13,6 +17,12 @@ import {
 import { getChargePoints, getConfigBool } from "@/lib/system-config";
 import { jsonError } from "@/lib/api-response";
 import { fetchQuickRouterQuota } from "@/lib/quickrouter-quota";
+import { estimateApiCostCny } from "@/lib/api-cost";
+
+/** 香港节点，靠近 QuickRouter / 国内访问；生图需 Pro 计划 maxDuration>60 */
+export const preferredRegion = ["hkg1", "sin1"];
+export const maxDuration = 300;
+export const dynamic = "force-dynamic";
 
 export async function POST(req: Request) {
   const started = Date.now();
@@ -32,21 +42,76 @@ export async function POST(req: Request) {
     const body = (await req.json()) as {
       message?: string;
       conversationId?: string | null;
+      projectId?: string | null;
       groupId?: string;
       truncateFromMessageId?: string;
       attachments?: MessageAttachment[];
+      answerMode?: string | null;
+      sceneTemplateId?: string | null;
+      useMemory?: boolean;
+      imageEdit?: {
+        sourceImageUrl?: string;
+        maskDataUrl?: string | null;
+        maskPreviewDataUrl?: string | null;
+        prompt?: string;
+      };
     };
 
-    const message = body.message?.trim() ?? "";
+    const imageEditBody = body.imageEdit;
+    const imageEditPrompt = imageEditBody?.prompt?.trim() ?? "";
+    const imageEditSource = imageEditBody?.sourceImageUrl?.trim() ?? "";
+    const isImageEditRequest = Boolean(imageEditSource && imageEditPrompt);
+
+    const message = isImageEditRequest ? imageEditPrompt : (body.message?.trim() ?? "");
     const attachments = body.attachments ?? [];
     const hasImageAttachment = attachments.some((a) => a.kind === "image");
 
-    if (!message && attachments.length === 0) {
+    if (!message && attachments.length === 0 && !isImageEditRequest) {
       throw new AppError("INVALID_INPUT", "请输入文字或上传附件");
     }
 
-    const intent = detectIntent(message);
-    const isImage = intent === "image" && !hasImageAttachment && attachments.length === 0;
+    let historyForIntent: {
+      role: string;
+      contentType: string;
+      imageUrl: string | null;
+      attachments: string | null;
+    }[] = [];
+
+    if (body.conversationId) {
+      historyForIntent = await prisma.message.findMany({
+        where: { conversationId: body.conversationId, role: { in: ["user", "assistant"] } },
+        orderBy: { createdAt: "asc" },
+        take: 30,
+        select: {
+          role: true,
+          contentType: true,
+          imageUrl: true,
+          attachments: true,
+        },
+      });
+    }
+
+    let imageRequest = resolveImageRequest({
+      message,
+      attachments,
+      history: historyForIntent.map((m) => ({
+        role: m.role as "user" | "assistant",
+        contentType: m.contentType as "text" | "image",
+        imageUrl: m.imageUrl,
+        attachments: m.attachments,
+      })),
+    });
+
+    if (isImageEditRequest) {
+      imageRequest = {
+        shouldGenerate: true,
+        prompt: imageEditPrompt,
+        referenceImageUrls: [imageEditSource],
+        maskDataUrl: imageEditBody?.maskDataUrl ?? undefined,
+      };
+    }
+
+    const isImage = imageRequest.shouldGenerate;
 
     if (isImage && !(await getConfigBool("image_enabled", true))) {
       throw new AppError("IMAGE_DISABLED", "图片生成功能已关闭", 403);
@@ -60,7 +125,12 @@ export async function POST(req: Request) {
 
     if (!isImage) {
       const apiQuota = await fetchQuickRouterQuota();
-      if (apiQuota.available && apiQuota.balance != null && apiQuota.balance <= 0) {
+      if (
+        apiQuota.available &&
+        !apiQuota.unlimited &&
+        apiQuota.balance != null &&
+        apiQuota.balance <= 0
+      ) {
         await refundPoints(userId, costPoints);
         throw new AppError(
           "OPENAI_QUOTA",
@@ -71,6 +141,17 @@ export async function POST(req: Request) {
     }
 
     let conversationId = body.conversationId ?? null;
+    const answerModeSlug = body.answerMode?.trim() || "quick";
+    const sceneTemplateSlug = body.sceneTemplateId?.trim() || null;
+    const useMemory = body.useMemory !== false;
+    let projectId = body.projectId ?? null;
+
+    if (projectId) {
+      const owned = await prisma.project.findFirst({
+        where: { id: projectId, userId, status: "active" },
+      });
+      if (!owned) projectId = null;
+    }
 
     if (!conversationId) {
       let groupId = body.groupId;
@@ -85,7 +166,15 @@ export async function POST(req: Request) {
       const titleSource = message || attachments[0]?.name || "新对话";
       const title = titleSource.length > 20 ? `${titleSource.slice(0, 20)}...` : titleSource;
       const conversation = await prisma.conversation.create({
-        data: { userId, groupId, title },
+        data: {
+          userId,
+          groupId,
+          title,
+          projectId,
+          answerModeSlug,
+          sceneTemplateSlug,
+          useMemory,
+        },
       });
       conversationId = conversation.id;
     } else {
@@ -93,6 +182,16 @@ export async function POST(req: Request) {
         where: { id: conversationId, userId, status: "active" },
       });
       if (!exists) throw new AppError("NOT_FOUND", "会话不存在", 404);
+
+      await prisma.conversation.update({
+        where: { id: conversationId },
+        data: {
+          projectId,
+          answerModeSlug,
+          sceneTemplateSlug,
+          useMemory,
+        },
+      });
 
       if (body.truncateFromMessageId) {
         const target = await prisma.message.findFirst({
@@ -109,6 +208,16 @@ export async function POST(req: Request) {
       }
     }
 
+    let userAttachments: MessageAttachment[] = [...attachments];
+    if (isImageEditRequest && imageEditBody?.maskPreviewDataUrl) {
+      try {
+        const preview = await maskPreviewAttachment(imageEditBody.maskPreviewDataUrl, userId);
+        userAttachments = [preview, ...userAttachments];
+      } catch (err) {
+        console.warn("mask preview save failed:", err);
+      }
+    }
+
     const userMessage = await prisma.message.create({
       data: {
         conversationId,
@@ -116,20 +225,49 @@ export async function POST(req: Request) {
         role: "user",
         contentType: "text",
         content: message || (hasImageAttachment ? "请分析我上传的图片" : "请查看我上传的文档"),
-        attachments: serializeAttachments(attachments),
+        attachments: serializeAttachments(userAttachments),
       },
     });
 
     if (isImage) {
+      const imagePrompt =
+        imageRequest.prompt ||
+        message ||
+        (imageRequest.referenceImageUrls.length > 0
+          ? "根据参考图生成新图片，保持构图与主体"
+          : "生成一张图片");
+
+      const pendingUsage = await createUsageRecord({
+        userId,
+        conversationId,
+        usageType: "image",
+        modelName: process.env.IMAGE_MODEL_NAME ?? "gpt-image-2",
+        costPoints,
+        status: "pending",
+      });
+      usageRecordId = pendingUsage.id;
+
+      logImage("chat_start", {
+        conversationId,
+        userId,
+        refs: imageRequest.referenceImageUrls.length,
+        usageRecordId: pendingUsage.id,
+      });
+
       try {
-        const { url, model } = await generateImage(message);
+        const { url, model } = await generateImage({
+          prompt: imagePrompt,
+          referenceImageUrls: imageRequest.referenceImageUrls,
+          maskDataUrl: imageRequest.maskDataUrl,
+          abortSignal: req.signal,
+        });
         const assistantMessage = await prisma.message.create({
           data: {
             conversationId,
             userId,
             role: "assistant",
             contentType: "image",
-            content: message,
+            content: imagePrompt,
             imageUrl: url,
           },
         });
@@ -140,23 +278,28 @@ export async function POST(req: Request) {
           data: {
             updatedAt: new Date(),
             ...(conv?.title === "新对话"
-              ? { title: message.length > 20 ? `${message.slice(0, 20)}...` : message }
+              ? {
+                  title:
+                    imagePrompt.length > 20 ? `${imagePrompt.slice(0, 20)}...` : imagePrompt,
+                }
               : {}),
           },
         });
 
-        const usage = await createUsageRecord({
-          userId,
-          conversationId,
-          messageId: assistantMessage.id,
-          usageType: "image",
-          modelName: model,
-          costPoints,
-          status: "success",
-          responseMs: Date.now() - started,
-          estimatedCost: costPoints * 0.1,
+        const imageApiCost = await estimateApiCostCny({ usageType: "image" });
+        const responseMs = Date.now() - started;
+        await prisma.usageRecord.update({
+          where: { id: pendingUsage.id },
+          data: {
+            messageId: assistantMessage.id,
+            modelName: model,
+            status: "success",
+            responseMs,
+            estimatedCost: imageApiCost,
+          },
         });
-        usageRecordId = usage.id;
+
+        logImage("chat_done", { conversationId, responseMs, usageRecordId: pendingUsage.id });
 
         return Response.json({
           type: "image",
@@ -171,22 +314,28 @@ export async function POST(req: Request) {
             id: assistantMessage.id,
             role: "assistant",
             contentType: "image",
-            content: message,
+            content: imagePrompt,
             imageUrl: url,
           },
           balanceDeducted: costPoints,
         });
       } catch (err) {
+        const responseMs = Date.now() - started;
+        const errorMessage = err instanceof Error ? err.message : "生图失败";
         await refundPoints(userId, costPoints, usageRecordId);
-        await createUsageRecord({
-          userId,
+        await prisma.usageRecord.update({
+          where: { id: pendingUsage.id },
+          data: {
+            status: "refunded",
+            errorMessage,
+            responseMs,
+          },
+        });
+        logImage("chat_failed", {
           conversationId,
-          usageType: "image",
-          modelName: process.env.IMAGE_MODEL_NAME ?? "gpt-image-2",
-          costPoints,
-          status: "refunded",
-          errorMessage: err instanceof Error ? err.message : "生图失败",
-          responseMs: Date.now() - started,
+          responseMs,
+          usageRecordId: pendingUsage.id,
+          error: errorMessage.slice(0, 200),
         });
         throw err;
       }
@@ -198,8 +347,15 @@ export async function POST(req: Request) {
       take: 30,
     });
 
-    const chatMessages = await buildChatMessages(
-      history
+    const { messages: chatMessages, meta: promptMeta } = await buildPromptContext({
+      userId,
+      conversationId,
+      projectId,
+      answerModeSlug,
+      sceneTemplateSlug,
+      useMemory,
+      userMessage: message || userMessage.content,
+      history: history
         .filter((m) => m.id !== userMessage.id)
         .map((m) => ({
           role: m.role as "user" | "assistant",
@@ -208,89 +364,114 @@ export async function POST(req: Request) {
           imageUrl: m.imageUrl,
           attachments: m.attachments,
         })),
-      message || userMessage.content,
       attachments,
-    );
+    });
 
-    let fullText = "";
-    let modelName = process.env.TEXT_MODEL_NAME ?? "gpt-5.5";
-    let usage: { inputTokens?: number; outputTokens?: number; totalTokens?: number } | undefined;
+    let streamModelName = process.env.TEXT_MODEL_NAME ?? "gpt-5.5";
 
     try {
-      const result = await generateTextReply(chatMessages);
-      fullText = result.text;
-      usage = result.usage;
-      modelName = result.modelName;
+      const { result, modelName } = createTextStream(chatMessages, {
+        abortSignal: req.signal,
+        onFinish: async ({ text, usage }) => {
+          if (!text.trim()) {
+            await refundPoints(userId, costPoints);
+            await createUsageRecord({
+              userId,
+              conversationId,
+              usageType: "text",
+              modelName: streamModelName,
+              costPoints,
+              status: "refunded",
+              errorMessage: "API 未返回内容",
+              responseMs: Date.now() - started,
+            });
+            return;
+          }
+
+          const assistantMessage = await prisma.message.create({
+            data: {
+              conversationId,
+              userId,
+              role: "assistant",
+              contentType: "text",
+              content: text,
+            },
+          });
+
+          await prisma.conversation.update({
+            where: { id: conversationId },
+            data: { updatedAt: new Date() },
+          });
+
+          const textApiCost = await estimateApiCostCny({
+            usageType: "text",
+            totalTokens: usage?.totalTokens,
+          });
+          await createUsageRecord({
+            userId,
+            conversationId,
+            messageId: assistantMessage.id,
+            usageType: "text",
+            modelName: streamModelName,
+            costPoints,
+            status: "success",
+            inputTokens: usage?.inputTokens,
+            outputTokens: usage?.outputTokens,
+            totalTokens: usage?.totalTokens,
+            estimatedCost: textApiCost,
+            responseMs: Date.now() - started,
+          });
+
+          try {
+            await applyMemoryUpdates({
+              userId,
+              conversationId,
+              projectId,
+              userMessage: message || userMessage.content,
+              assistantReply: text,
+            });
+          } catch {
+            /* 记忆更新失败不影响主流程 */
+          }
+        },
+      });
+      streamModelName = modelName;
+
+      const contextHeader = Buffer.from(
+        JSON.stringify({
+          answerMode: promptMeta.answerModeName,
+          usedProfile: promptMeta.usedProfile,
+          usedProjectMemory: promptMeta.usedProjectMemory,
+          usedConversationSummary: promptMeta.usedConversationSummary,
+          usedSceneTemplate: promptMeta.usedSceneTemplate,
+          riskDetected: promptMeta.riskDetected,
+        }),
+        "utf8",
+      ).toString("base64");
+
+      return result.toTextStreamResponse({
+        headers: {
+          "Cache-Control": "no-cache, no-transform",
+          "X-Accel-Buffering": "no",
+          "X-Conversation-Id": conversationId,
+          "X-User-Message-Id": userMessage.id,
+          "X-Prompt-Context": contextHeader,
+        },
+      });
     } catch (err) {
       await refundPoints(userId, costPoints);
       await createUsageRecord({
         userId,
         conversationId,
         usageType: "text",
-        modelName,
+        modelName: streamModelName,
         costPoints,
         status: "refunded",
-        errorMessage: err instanceof Error ? err.message : "文本生成失败",
+        errorMessage: err instanceof Error ? mapApiError(err).message : "文本生成失败",
         responseMs: Date.now() - started,
       });
-      throw err;
+      throw mapApiError(err);
     }
-
-    if (!fullText.trim()) {
-      await refundPoints(userId, costPoints);
-      throw new AppError(
-        "AI_EMPTY",
-        "API 未返回内容，请检查 QuickRouter 余额与模型 gpt-5.5 是否可用",
-        502,
-      );
-    }
-
-    const assistantMessage = await prisma.message.create({
-      data: {
-        conversationId,
-        userId,
-        role: "assistant",
-        contentType: "text",
-        content: fullText,
-      },
-    });
-
-    await prisma.conversation.update({
-      where: { id: conversationId },
-      data: { updatedAt: new Date() },
-    });
-
-    await createUsageRecord({
-      userId,
-      conversationId,
-      messageId: assistantMessage.id,
-      usageType: "text",
-      modelName,
-      costPoints,
-      status: "success",
-      inputTokens: usage?.inputTokens,
-      outputTokens: usage?.outputTokens,
-      totalTokens: usage?.totalTokens,
-      responseMs: Date.now() - started,
-    });
-
-    return Response.json({
-      type: "text",
-      conversationId,
-      userMessage: {
-        id: userMessage.id,
-        role: "user",
-        contentType: "text",
-        content: userMessage.content,
-        attachments: parseAttachments(userMessage.attachments),
-      },
-      message: {
-        id: assistantMessage.id,
-        role: "assistant",
-        contentType: "text",
-        content: fullText,
-      },
-    });
   } catch (error) {
     if (userId && costPoints > 0 && error instanceof AppError && error.code !== "INSUFFICIENT_BALANCE") {
       try {

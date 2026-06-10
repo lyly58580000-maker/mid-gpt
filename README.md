@@ -8,7 +8,8 @@
 
 | 版本 | 说明 |
 |------|------|
-| **[v1.0.1](https://github.com/lyly58580000-maker/mid-gpt/releases/tag/v1.0.1)** | 对话修复、并行聊天、注册送点、Vercel 部署完善 |
+| **[v1.1.0](https://github.com/lyly58580000-maker/mid-gpt/releases/tag/v1.1.0)** | 工作区模式、流式 Markdown、蒙版改图、灰度反馈留言板 |
+| [v1.0.1](https://github.com/lyly58580000-maker/mid-gpt/releases/tag/v1.0.1) | 对话修复、并行聊天、注册送点、Vercel 部署完善 |
 | [v1.0.0](https://github.com/lyly58580000-maker/mid-gpt/releases/tag/v1.0.0) | 首个可运行版本：聊天、生图、管理后台、余额流水 |
 
 ## 快速启动

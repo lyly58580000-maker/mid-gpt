@@ -40,7 +40,13 @@ export async function PATCH(req: Request, { params }: Params) {
     if (!session) throw new Error("UNAUTHORIZED");
 
     const { id } = await params;
-    const body = (await req.json()) as { title?: string; groupId?: string };
+    const body = (await req.json()) as {
+      title?: string;
+      groupId?: string;
+      projectId?: string | null;
+      answerModeSlug?: string;
+      sceneTemplateSlug?: string | null;
+    };
 
     const conversation = await prisma.conversation.findFirst({
       where: { id, userId: session.userId, status: "active" },
@@ -53,6 +59,9 @@ export async function PATCH(req: Request, { params }: Params) {
       data: {
         ...(body.title ? { title: body.title.trim() } : {}),
         ...(body.groupId ? { groupId: body.groupId } : {}),
+        ...(body.projectId !== undefined ? { projectId: body.projectId } : {}),
+        ...(body.answerModeSlug ? { answerModeSlug: body.answerModeSlug } : {}),
+        ...(body.sceneTemplateSlug !== undefined ? { sceneTemplateSlug: body.sceneTemplateSlug } : {}),
         updatedAt: new Date(),
       },
     });

@@ -6,9 +6,24 @@ import { jsonError } from "@/lib/api-response";
 import { getConfigBool, getConfigInt } from "@/lib/system-config";
 import { AppError } from "@/lib/billing";
 import { BalanceChangeType } from "@prisma/client";
+import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import { assertSameOrigin } from "@/lib/request-security";
 
 export async function POST(req: NextRequest) {
   try {
+    const blocked = assertSameOrigin(req);
+    if (blocked) return blocked;
+
+    const ip = getClientIp(req);
+    const limit = checkRateLimit(`register:${ip}`, 5, 60 * 60 * 1000);
+    if (!limit.ok) {
+      throw new AppError(
+        "RATE_LIMITED",
+        `注册尝试过多，请 ${limit.retryAfterSec} 秒后再试`,
+        429,
+      );
+    }
+
     const registerEnabled = await getConfigBool("register_enabled", true);
     if (!registerEnabled) throw new AppError("REGISTER_DISABLED", "当前暂不开放注册", 403);
 
@@ -27,7 +42,7 @@ export async function POST(req: NextRequest) {
     const existing = await prisma.user.findUnique({ where: { email: normalizedEmail } });
     if (existing) throw new AppError("EMAIL_EXISTS", "该邮箱已注册，请直接登录", 409);
 
-    const welcomePoints = await getConfigInt("register_welcome_points", 20);
+    const welcomePoints = await getConfigInt("register_welcome_points", 15);
     const passwordHash = await bcrypt.hash(password, 12);
 
     const user = await prisma.$transaction(async (tx) => {

@@ -5,9 +5,24 @@ import { NextResponse } from "next/server";
 import { attachSessionCookie, createSessionToken, getSession } from "@/lib/auth";
 import { jsonError, jsonOk } from "@/lib/api-response";
 import { AppError } from "@/lib/billing";
+import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import { assertSameOrigin } from "@/lib/request-security";
 
 export async function POST(req: NextRequest) {
   try {
+    const blocked = assertSameOrigin(req);
+    if (blocked) return blocked;
+
+    const ip = getClientIp(req);
+    const limit = checkRateLimit(`login:${ip}`, 10, 15 * 60 * 1000);
+    if (!limit.ok) {
+      throw new AppError(
+        "RATE_LIMITED",
+        `登录尝试过多，请 ${limit.retryAfterSec} 秒后再试`,
+        429,
+      );
+    }
+
     const body = await req.json();
     const { email, password, portal = "user" } = body as {
       email?: string;
@@ -62,6 +77,7 @@ export async function POST(req: NextRequest) {
         redirectTo,
       }),
       token,
+      user.role,
     );
   } catch (error) {
     return jsonError(error);

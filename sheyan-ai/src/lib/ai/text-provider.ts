@@ -3,26 +3,10 @@ import { streamText, type ModelMessage } from "ai";
 import { parseAttachments, type MessageAttachment, type ModelContentPart } from "@/lib/attachments";
 import { buildModelContentParts } from "@/lib/attachments.server";
 
-export const SYSTEM_PROMPT = `你是设研AI，一个简洁专业的 AI 助手，基于 GPT-5.5 大语言模型运行。请用中文回答，语气清晰、结构清楚，像 ChatGPT 一样易读。
+import { BASE_SYSTEM_PROMPT } from "@/lib/ai/base-system-prompt";
 
-身份说明（仅在用户询问时回答）：
-- 你是「设研AI」
-- 当前使用的大模型是 GPT-5.5
-不要说自己是 OpenAI 官方助手，也不要说无法确定模型名称。
-
-输出格式（必须遵守）：
-1. 先给一句简短结论，再展开说明
-2. 使用标准 Markdown，但语法必须完整正确：
-   - 加粗用 **文字**，不要单独输出 ** 符号
-   - 代码块必须用成对的三反引号包裹，并写清语言，例如 \`\`\`prisma
-   - 不要输出孤立的 \`\`\` 或 --- 等无意义符号行
-3. 分段清晰：段落之间空一行；需要分点时用有序/无序列表
-4. 标题只用 ## 或 ###，不要滥用 # 或过多层级
-5. 代码与技术说明：先解释「是什么/为什么」，再给代码示例
-6. 避免堆砌符号、避免重复啰嗦、避免输出 HTML 标签
-
-当用户上传图片或文档时，请结合附件内容作答。
-当对话中已生成过图片（系统会在上下文中提供该图），用户提到「这张图/这张照片/这个照片」时，请直接结合该图作答，不要要求用户再次上传。`;
+/** @deprecated 使用 buildPromptContext 动态组装 */
+export const SYSTEM_PROMPT = BASE_SYSTEM_PROMPT;
 
 const IMAGE_REF = /这张图|这张照片|这个照片|上面的图|刚才的图|生成的图|这幅图|此图/;
 
@@ -117,7 +101,7 @@ async function toModelMessage(
   );
 }
 
-function mapApiError(err: unknown): Error {
+export function mapApiError(err: unknown): Error {
   const msg = err instanceof Error ? err.message : String(err);
   if (msg.includes("insufficient_quota") || msg.includes("quota is not enough") || msg.includes("quota")) {
     return new Error("QuickRouter API 额度不足，请登录 quickrouter.ai 控制台充值后再试");
@@ -134,20 +118,34 @@ function mapApiError(err: unknown): Error {
   return err instanceof Error ? err : new Error(msg);
 }
 
-export async function generateTextReply(messages: ModelMessage[]) {
+type TextStreamFinish = Parameters<typeof streamText>[0]["onFinish"];
+
+export function createTextStream(
+  messages: ModelMessage[],
+  options?: {
+    abortSignal?: AbortSignal;
+    onFinish?: TextStreamFinish;
+  },
+) {
   const modelName = process.env.TEXT_MODEL_NAME ?? "gpt-5.5";
   const maxTokens = Number(process.env.TEXT_MAX_OUTPUT_TOKENS ?? 4096);
   const openai = getTextClient();
 
-  try {
-    // QuickRouter gpt-5.5 走 Responses API：streamText 可用，generateText 会报 Invalid JSON
-    const result = streamText({
-      model: openai(modelName),
-      system: SYSTEM_PROMPT,
-      messages,
-      maxOutputTokens: maxTokens,
-    });
+  const result = streamText({
+    model: openai(modelName),
+    messages,
+    maxOutputTokens: maxTokens,
+    abortSignal: options?.abortSignal,
+    onFinish: options?.onFinish,
+  });
 
+  return { result, modelName };
+}
+
+/** @deprecated 仅测试脚本使用；线上对话请走 createTextStream 流式输出 */
+export async function generateTextReply(messages: ModelMessage[]) {
+  try {
+    const { result, modelName } = createTextStream(messages);
     const text = await result.text;
     const usage = await result.usage;
 

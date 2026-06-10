@@ -48,6 +48,11 @@ enum BalanceChangeType {
   system_gift
 }
 
+enum BetaFeedbackStatus {
+  open
+  resolved
+}
+
 model User {
   id           String     @id @default(cuid())
   email        String     @unique
@@ -66,6 +71,103 @@ model User {
   conversations  Conversation[]
   usageRecords   UsageRecord[]
   balanceRecords BalanceRecord[]
+  profile        UserProfile?
+  projects       Project[]
+  projectMemories ProjectMemory[]
+  betaFeedbacks  BetaFeedback[]
+}
+
+model UserProfile {
+  id                String   @id @default(cuid())
+  userId            String   @unique
+  identitySummary   String?
+  preferenceSummary String?
+  commonTasks       String?
+  dislikedStyles    String?
+  outputPreference  String?
+  expertiseLevel    String?
+  interactionStyle  String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Project {
+  id           String   @id @default(cuid())
+  userId       String
+  name         String
+  type         String?
+  summary      String?
+  currentStage String?
+  keyDecisions String?
+  constraints  String?
+  status       String   @default("active")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  user          User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  memories      ProjectMemory[]
+  conversations Conversation[]
+  summaries     ConversationSummary[]
+}
+
+model ProjectMemory {
+  id                   String   @id @default(cuid())
+  userId               String
+  projectId            String
+  memoryType           String
+  content              String
+  confidence           Float    @default(0.8)
+  sourceConversationId String?
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([userId, projectId])
+}
+
+model ConversationSummary {
+  id               String   @id @default(cuid())
+  userId           String
+  conversationId   String   @unique
+  projectId        String?
+  summary          String?
+  keyPoints        String?
+  latestUserIntent String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  project      Project?     @relation(fields: [projectId], references: [id], onDelete: SetNull)
+}
+
+model SceneTemplate {
+  id                String   @id @default(cuid())
+  slug              String   @unique
+  name              String
+  type              String
+  description       String?
+  systemInstruction String
+  outputStructure   String?
+  isActive          Boolean  @default(true)
+  isDefaultEnabled  Boolean  @default(false)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+}
+
+model AnswerMode {
+  id                  String   @id @default(cuid())
+  slug                String   @unique
+  name                String
+  description         String?
+  instruction         String
+  maxLengthPreference String?
+  isDefault           Boolean  @default(false)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
 }
 
 model ChatGroup {
@@ -83,17 +185,23 @@ model ChatGroup {
 }
 
 model Conversation {
-  id        String   @id @default(cuid())
-  userId    String
-  groupId   String
-  title     String   @default("新对话")
-  status    String   @default("active")
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id                String   @id @default(cuid())
+  userId            String
+  groupId           String
+  projectId         String?
+  title             String   @default("新对话")
+  answerModeSlug    String   @default("quick")
+  sceneTemplateSlug String?
+  useMemory         Boolean  @default(true)
+  status            String   @default("active")
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
 
-  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  group    ChatGroup @relation(fields: [groupId], references: [id])
+  user     User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  group    ChatGroup            @relation(fields: [groupId], references: [id])
+  project  Project?             @relation(fields: [projectId], references: [id], onDelete: SetNull)
   messages Message[]
+  summary  ConversationSummary?
 }
 
 model Message {
@@ -151,4 +259,25 @@ model SystemConfig {
   configValue String
   description String?
   updatedAt   DateTime @updatedAt
+}
+
+/// 灰度反馈模块（可整包删除，见 src/features/beta-feedback/README.md）
+model BetaFeedback {
+  id           String             @id @default(cuid())
+  userId       String
+  publicAlias  String
+  content      String
+  attachments  String?
+  status       BetaFeedbackStatus @default(open)
+  resolvedAt   DateTime?
+  resolvedNote String?
+  rewardPoints Int                @default(0)
+  rewardTier   String?
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([status, createdAt(sort: Desc)])
+  @@index([userId, createdAt(sort: Desc)])
 }

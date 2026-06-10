@@ -10,17 +10,19 @@ import {
   Server,
   Settings,
   LogOut,
-  CreditCard,
+  BarChart3,
+  MessageSquareWarning,
 } from "lucide-react";
 
 const navItems = [
   { href: "/admin", label: "总控仪表盘", icon: LayoutDashboard },
+  { href: "/admin/analytics", label: "用量分析", icon: BarChart3 },
   { href: "/admin/users", label: "用户管理", icon: Users },
-  { href: "/admin/balance-records", label: "余额流水", icon: CreditCard },
   { href: "/admin/logs/text", label: "调用日志", icon: FileText },
   { href: "/admin/logs/image", label: "生图日志", icon: ImageIcon },
   { href: "/admin/models", label: "模型配置", icon: Server },
   { href: "/admin/settings", label: "系统开关", icon: Settings },
+  { href: "/admin/beta-feedback", label: "灰度反馈", icon: MessageSquareWarning },
 ];
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {

@@ -26,13 +26,29 @@ import {
   RefreshCw,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { MarkdownMessage } from "@/components/chat/markdown-message";
+import { AssistantMarkdown } from "@/components/chat/markdown-message";
+import { ImageEditorModal } from "@/components/chat/image-editor-modal";
+import {
+  WorkspaceBar,
+  type AnswerModeItem,
+  type ContextHints,
+  type ProjectItem,
+  type SceneTemplateItem,
+} from "@/components/chat/workspace-bar";
+import { ProfilePanel, ProjectPanel } from "@/components/chat/workspace-panels";
 import {
   isAllowedMime,
   MAX_ATTACHMENTS,
   parseAttachments,
   type MessageAttachment,
 } from "@/lib/attachments";
+import { resolveImageRequest } from "@/lib/ai/image-intent";
+import { compressImageForUpload } from "@/lib/client-image-compress";
+import {
+  consumeTextStream,
+  createThrottledStreamWriter,
+  isStreamingMessage,
+} from "@/lib/chat-stream-client";
 
 type Group = { id: string; name: string; count: number; isSystem: boolean; isDefault?: boolean };
 type Chat = { id: string; title: string; groupId: string; updatedAt: string };
@@ -51,6 +67,7 @@ type PendingAttachment = {
   previewUrl?: string;
   uploaded?: MessageAttachment;
   uploading?: boolean;
+  compressing?: boolean;
   error?: string;
 };
 
@@ -136,8 +153,20 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const userMenuRef = useRef<HTMLDivElement>(null);
   const [usageRecords, setUsageRecords] = useState<
-    { id: string; time: string; type: string; cost: string; status: string }[]
+    {
+      id: string;
+      time: string;
+      type: string;
+      cost: string;
+      status: string;
+      duration?: string;
+      error?: string;
+    }[]
   >([]);
+  const [generatingMeta, setGeneratingMeta] = useState<{
+    kind: "text" | "image";
+    elapsed: number;
+  } | null>(null);
   const [groupNameInput, setGroupNameInput] = useState("");
   const [renameGroupTarget, setRenameGroupTarget] = useState<Group | null>(null);
   const [deleteGroupTarget, setDeleteGroupTarget] = useState<Group | null>(null);
@@ -146,17 +175,28 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
   const [chatTitleInput, setChatTitleInput] = useState("");
   const [errorHint, setErrorHint] = useState("");
   const [welcomeHint, setWelcomeHint] = useState("");
+  const [answerModes, setAnswerModes] = useState<AnswerModeItem[]>([]);
+  const [sceneTemplates, setSceneTemplates] = useState<SceneTemplateItem[]>([]);
+  const [projects, setProjects] = useState<ProjectItem[]>([]);
+  const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
+  const [answerModeSlug, setAnswerModeSlug] = useState("quick");
+  const [sceneTemplateSlug, setSceneTemplateSlug] = useState("");
+  const [lastContextHints, setLastContextHints] = useState<ContextHints | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [truncateFromMessageId, setTruncateFromMessageId] = useState<string | null>(null);
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
   const [isDragging, setIsDragging] = useState(false);
   const [showScrollBottom, setShowScrollBottom] = useState(false);
   const [loadingConversation, setLoadingConversation] = useState(false);
+  const [imageEditorUrl, setImageEditorUrl] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const chatScrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dragCounterRef = useRef(0);
   const generatingIdsRef = useRef<Set<string>>(new Set());
+  const generatingTaskRef = useRef<Map<string, { kind: "text" | "image"; startedAt: number }>>(
+    new Map(),
+  );
   const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
   const activeChatRef = useRef<string | null>(activeChat);
   const conversationLoadIdRef = useRef(0);
@@ -166,20 +206,45 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
   const chatSessionKey = (id: string | null) => id ?? NEW_CHAT_KEY;
   const activeSessionKey = chatSessionKey(activeChat);
   const isActiveChatGenerating = generatingIds.has(activeSessionKey);
+  const hasActiveStreamMessage = messages.some(isStreamingMessage);
+  const showGeneratingPlaceholder = isActiveChatGenerating && !hasActiveStreamMessage;
 
   const syncGeneratingState = () => {
     setGeneratingIds(new Set(generatingIdsRef.current));
   };
 
-  const markGenerating = (key: string) => {
+  const markGenerating = (key: string, kind: "text" | "image" = "text") => {
     generatingIdsRef.current.add(key);
+    generatingTaskRef.current.set(key, { kind, startedAt: Date.now() });
     syncGeneratingState();
   };
 
   const unmarkGenerating = (key: string) => {
     generatingIdsRef.current.delete(key);
+    generatingTaskRef.current.delete(key);
     syncGeneratingState();
   };
+
+  useEffect(() => {
+    if (!isActiveChatGenerating) {
+      setGeneratingMeta(null);
+      return;
+    }
+    const meta = generatingTaskRef.current.get(activeSessionKey);
+    if (!meta) {
+      setGeneratingMeta(null);
+      return;
+    }
+    const tick = () => {
+      setGeneratingMeta({
+        kind: meta.kind,
+        elapsed: Math.floor((Date.now() - meta.startedAt) / 1000),
+      });
+    };
+    tick();
+    const timer = window.setInterval(tick, 1000);
+    return () => window.clearInterval(timer);
+  }, [isActiveChatGenerating, activeSessionKey]);
 
   useEffect(() => {
     activeChatRef.current = activeChat;
@@ -206,6 +271,20 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
     }
   };
 
+  const loadWorkspaceData = async () => {
+    const [modesRes, templatesRes, projectsRes] = await Promise.all([
+      fetch("/api/answer-modes"),
+      fetch("/api/scene-templates"),
+      fetch("/api/projects"),
+    ]);
+    const modesData = await modesRes.json();
+    const templatesData = await templatesRes.json();
+    const projectsData = await projectsRes.json();
+    setAnswerModes(modesData.modes ?? []);
+    setSceneTemplates(templatesData.templates ?? []);
+    setProjects(projectsData.projects ?? []);
+  };
+
   const getChatIdFromPath = () => {
     if (typeof window === "undefined") return initialConversationId ?? null;
     const match = window.location.pathname.match(/^\/chat\/([^/]+)$/);
@@ -229,6 +308,11 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
       if (!res.ok) {
         setErrorHint(data.error?.message ?? "加载对话失败");
         return;
+      }
+      if (data.conversation) {
+        setActiveProjectId(data.conversation.projectId ?? null);
+        setAnswerModeSlug(data.conversation.answerModeSlug ?? "quick");
+        setSceneTemplateSlug(data.conversation.sceneTemplateSlug ?? "");
       }
       setMessages(
         (data.messages ?? [])
@@ -269,6 +353,7 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
   useEffect(() => {
     loadGroups();
     loadBalance();
+    loadWorkspaceData();
 
     const bonus = sessionStorage.getItem("welcome_bonus");
     if (bonus) {
@@ -367,6 +452,12 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
     return valid;
   };
 
+  const patchPending = (localId: string, patch: Partial<PendingAttachment>) => {
+    setPendingAttachments((prev) =>
+      prev.map((p) => (p.localId === localId ? { ...p, ...patch } : p)),
+    );
+  };
+
   const uploadFiles = async (files: FileList | File[]) => {
     const list = pickValidFiles(files);
     if (list.length === 0) return;
@@ -380,16 +471,45 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
       localId: `local-${Date.now()}-${Math.random().toString(36).slice(2)}`,
       file,
       previewUrl: file.type.startsWith("image/") ? URL.createObjectURL(file) : undefined,
-      uploading: true,
+      compressing: file.type.startsWith("image/") && file.type !== "image/gif",
+      uploading: !file.type.startsWith("image/") || file.type === "image/gif",
     }));
 
     setPendingAttachments((prev) => [...prev, ...placeholders]);
 
+    const prepared = await Promise.all(
+      list.map(async (file, i) => {
+        const ph = placeholders[i]!;
+        if (file.type.startsWith("image/") && file.type !== "image/gif") {
+          try {
+            const compressed = await compressImageForUpload(file);
+            patchPending(ph.localId, {
+              file: compressed,
+              compressing: false,
+              uploading: true,
+            });
+            return compressed;
+          } catch {
+            patchPending(ph.localId, { compressing: false, uploading: true });
+            return file;
+          }
+        }
+        return file;
+      }),
+    );
+
     const form = new FormData();
-    list.forEach((file) => form.append("files", file));
+    prepared.forEach((file) => form.append("files", file));
+
+    const controller = new AbortController();
+    const uploadTimer = window.setTimeout(() => controller.abort(), 90_000);
 
     try {
-      const res = await fetch("/api/upload", { method: "POST", body: form });
+      const res = await fetch("/api/upload", {
+        method: "POST",
+        body: form,
+        signal: controller.signal,
+      });
       const data = await res.json();
       if (!res.ok) {
         throw new Error(data.error?.message ?? "上传失败");
@@ -401,21 +521,33 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
         placeholders.forEach((ph, i) => {
           const idx = next.findIndex((p) => p.localId === ph.localId);
           if (idx >= 0) {
-            next[idx] = { ...next[idx], uploading: false, uploaded: uploaded[i] };
+            next[idx] = {
+              ...next[idx],
+              compressing: false,
+              uploading: false,
+              uploaded: uploaded[i],
+            };
           }
         });
         return next;
       });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "上传失败";
+      const msg =
+        err instanceof Error && err.name === "AbortError"
+          ? "上传超时，请检查网络或换一张较小的图片"
+          : err instanceof Error
+            ? err.message
+            : "上传失败";
       setPendingAttachments((prev) =>
         prev.map((p) =>
           placeholders.some((ph) => ph.localId === p.localId)
-            ? { ...p, uploading: false, error: msg }
+            ? { ...p, compressing: false, uploading: false, error: msg }
             : p,
         ),
       );
       setErrorHint(msg);
+    } finally {
+      window.clearTimeout(uploadTimer);
     }
   };
 
@@ -522,7 +654,7 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
     setMessages((prev) => prev.slice(0, assistantIndex - 1));
     setTruncateFromMessageId(userMsg.id.startsWith("temp-") ? null : userMsg.id);
     setErrorHint("");
-    handleSend(userMsg.content);
+    handleSend(userMsg.content, userMsg.attachments);
   };
 
   const handleStop = () => {
@@ -530,10 +662,170 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
     abortControllersRef.current.get(key)?.abort();
   };
 
-  const handleSend = async (text: string) => {
-    const readyAttachments = pendingAttachments
-      .filter((p) => p.uploaded && !p.error)
-      .map((p) => p.uploaded!);
+  const finishImageChatResponse = async (
+    res: Response,
+    opts: {
+      chatAtStart: string | null;
+      sessionKey: string;
+      userMsg: Message;
+      controller: AbortController;
+    },
+  ) => {
+    let { sessionKey } = opts;
+    const { chatAtStart, userMsg, controller } = opts;
+
+    const headerConversationId = res.headers.get("X-Conversation-Id");
+    const headerUserMessageId = res.headers.get("X-User-Message-Id");
+    const conversationId = headerConversationId ?? undefined;
+
+    if (conversationId && sessionKey === NEW_CHAT_KEY) {
+      unmarkGenerating(NEW_CHAT_KEY);
+      markGenerating(conversationId, "image");
+      abortControllersRef.current.delete(NEW_CHAT_KEY);
+      abortControllersRef.current.set(conversationId, controller);
+      sessionKey = conversationId;
+    }
+
+    if (headerUserMessageId) {
+      setMessages((prev) =>
+        prev.map((m) => (m.id === userMsg.id ? { ...m, id: headerUserMessageId } : m)),
+      );
+    }
+
+    const stillViewingSender =
+      activeChatRef.current === chatAtStart ||
+      (chatAtStart === null && activeChatRef.current === null) ||
+      (conversationId != null && activeChatRef.current === conversationId);
+
+    if (conversationId && stillViewingSender) {
+      setActiveChat(conversationId);
+      syncChatUrl(conversationId);
+    }
+
+    const raw = await res.text();
+    let data: {
+      conversationId?: string;
+      message?: Message;
+      error?: { message?: string };
+    } = {};
+    try {
+      data = raw ? JSON.parse(raw) : {};
+    } catch {
+      throw new Error("服务器响应格式异常，请刷新后重试");
+    }
+
+    const jsonConversationId = data.conversationId ?? conversationId;
+    if (jsonConversationId && stillViewingSender) {
+      await loadConversation(jsonConversationId);
+    }
+    await loadChats(activeGroup);
+    await loadBalance();
+  };
+
+  const handleImageEditSubmit = async ({
+    prompt,
+    maskDataUrl,
+    previewDataUrl,
+  }: {
+    prompt: string;
+    maskDataUrl: string | null;
+    previewDataUrl: string | null;
+  }) => {
+    if (!imageEditorUrl) return;
+    const sourceImageUrl = imageEditorUrl;
+    const chatAtStart = activeChatRef.current;
+    let sessionKey = chatSessionKey(chatAtStart);
+
+    if (generatingIdsRef.current.has(sessionKey)) return;
+
+    setImageEditorUrl(null);
+    setErrorHint("");
+
+    const maskPreviewAttachment: MessageAttachment | undefined =
+      maskDataUrl && previewDataUrl
+        ? {
+            id: `mask-preview-${Date.now()}`,
+            kind: "image",
+            name: "蒙版预览",
+            url: previewDataUrl,
+            mimeType: "image/jpeg",
+            size: 0,
+          }
+        : undefined;
+
+    const userMsg: Message = {
+      id: `temp-${Date.now()}`,
+      role: "user",
+      contentType: "text",
+      content: prompt,
+      attachments: maskPreviewAttachment ? [maskPreviewAttachment] : undefined,
+    };
+    setMessages((prev) => [...prev, userMsg]);
+    markGenerating(sessionKey, "image");
+
+    const controller = new AbortController();
+    abortControllersRef.current.set(sessionKey, controller);
+
+    try {
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({
+          message: prompt,
+          imageEdit: {
+            sourceImageUrl,
+            maskDataUrl,
+            maskPreviewDataUrl: previewDataUrl,
+            prompt,
+          },
+          conversationId: chatAtStart,
+          projectId: activeProjectId,
+          groupId: activeGroup,
+          answerMode: answerModeSlug,
+          sceneTemplateId: sceneTemplateSlug || null,
+          useMemory: true,
+        }),
+      });
+
+      if (!res.ok) {
+        const raw = await res.text();
+        let errData: { error?: { message?: string } } = {};
+        try {
+          errData = raw ? JSON.parse(raw) : {};
+        } catch {
+          throw new Error(`请求失败 (${res.status})，请刷新后重试`);
+        }
+        throw new Error(errData.error?.message ?? `请求失败 (${res.status})`);
+      }
+
+      await finishImageChatResponse(res, { chatAtStart, sessionKey, userMsg, controller });
+    } catch (err) {
+      const stillViewingSender = activeChatRef.current === chatAtStart;
+      if (err instanceof Error && err.name === "AbortError") {
+        if (stillViewingSender) {
+          const reloadId = sessionKey !== NEW_CHAT_KEY ? sessionKey : chatAtStart;
+          if (reloadId) await loadConversation(reloadId);
+        }
+        return;
+      }
+      const msg = err instanceof Error ? err.message : "图片编辑失败";
+      if (stillViewingSender) {
+        setErrorHint(msg);
+        setMessages((prev) =>
+          prev.filter((m) => !m.id.startsWith("temp-") && !m.id.startsWith("stream-")),
+        );
+      }
+    } finally {
+      unmarkGenerating(sessionKey);
+      abortControllersRef.current.delete(sessionKey);
+    }
+  };
+
+  const handleSend = async (text: string, attachmentOverride?: MessageAttachment[]) => {
+    const readyAttachments =
+      attachmentOverride ??
+      pendingAttachments.filter((p) => p.uploaded && !p.error).map((p) => p.uploaded!);
 
     const chatAtStart = activeChatRef.current;
     let sessionKey = chatSessionKey(chatAtStart);
@@ -541,8 +833,8 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
     if ((!text.trim() && readyAttachments.length === 0) || generatingIdsRef.current.has(sessionKey)) {
       return;
     }
-    if (pendingAttachments.some((p) => p.uploading)) {
-      setErrorHint("请等待附件上传完成");
+    if (pendingAttachments.some((p) => p.uploading || p.compressing)) {
+      setErrorHint("请等待附件处理完成");
       return;
     }
 
@@ -558,8 +850,26 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
       content: displayText,
       attachments: readyAttachments,
     };
-    setMessages((prev) => [...prev, userMsg]);
-    markGenerating(sessionKey);
+    const willGenerateImage = resolveImageRequest({
+      message: text.trim(),
+      attachments: readyAttachments,
+    }).shouldGenerate;
+    const assistantStreamId = willGenerateImage ? null : `stream-${Date.now()}`;
+    setMessages((prev) => [
+      ...prev,
+      userMsg,
+      ...(assistantStreamId
+        ? [
+            {
+              id: assistantStreamId,
+              role: "assistant" as const,
+              contentType: "text" as const,
+              content: "",
+            },
+          ]
+        : []),
+    ]);
+    markGenerating(sessionKey, willGenerateImage ? "image" : "text");
 
     const editingFromId = truncateFromMessageId;
     setTruncateFromMessageId(null);
@@ -577,43 +887,112 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
         body: JSON.stringify({
           message: text.trim(),
           conversationId: chatAtStart,
+          projectId: activeProjectId,
           groupId: activeGroup,
           attachments: readyAttachments,
+          answerMode: answerModeSlug,
+          sceneTemplateId: sceneTemplateSlug || null,
+          useMemory: true,
           ...(editingFromId ? { truncateFromMessageId: editingFromId } : {}),
         }),
       });
 
-      const raw = await res.text();
-      let data: { error?: { message?: string }; conversationId?: string } = {};
-      try {
-        data = raw ? JSON.parse(raw) : {};
-      } catch {
-        throw new Error(
-          res.ok ? "服务器响应格式异常，请刷新后重试" : `请求失败 (${res.status})，请刷新后重试`,
-        );
-      }
+      const contentType = res.headers.get("Content-Type") ?? "";
+      const headerConversationId = res.headers.get("X-Conversation-Id");
+      const headerUserMessageId = res.headers.get("X-User-Message-Id");
+      const promptContextB64 = res.headers.get("X-Prompt-Context");
 
       if (!res.ok) {
-        throw new Error(data.error?.message ?? `请求失败 (${res.status})`);
+        const raw = await res.text();
+        let errData: { error?: { message?: string } } = {};
+        try {
+          errData = raw ? JSON.parse(raw) : {};
+        } catch {
+          throw new Error(`请求失败 (${res.status})，请刷新后重试`);
+        }
+        throw new Error(errData.error?.message ?? `请求失败 (${res.status})`);
       }
 
-      if (data.conversationId && sessionKey === NEW_CHAT_KEY) {
+      if (promptContextB64) {
+        try {
+          setLastContextHints(JSON.parse(atob(promptContextB64)) as ContextHints);
+        } catch {
+          /* ignore */
+        }
+      }
+
+      const conversationId = headerConversationId ?? undefined;
+
+      if (conversationId && sessionKey === NEW_CHAT_KEY) {
         unmarkGenerating(NEW_CHAT_KEY);
-        markGenerating(data.conversationId);
+        markGenerating(conversationId);
         abortControllersRef.current.delete(NEW_CHAT_KEY);
-        abortControllersRef.current.set(data.conversationId, controller);
-        sessionKey = data.conversationId;
+        abortControllersRef.current.set(conversationId, controller);
+        sessionKey = conversationId;
+      }
+
+      if (headerUserMessageId) {
+        setMessages((prev) =>
+          prev.map((m) => (m.id === userMsg.id ? { ...m, id: headerUserMessageId } : m)),
+        );
       }
 
       const stillViewingSender =
         activeChatRef.current === chatAtStart ||
         (chatAtStart === null && activeChatRef.current === null) ||
-        (data.conversationId != null && activeChatRef.current === data.conversationId);
+        (conversationId != null && activeChatRef.current === conversationId);
 
-      if (data.conversationId && stillViewingSender) {
-        setActiveChat(data.conversationId);
-        syncChatUrl(data.conversationId);
-        await loadConversation(data.conversationId);
+      if (conversationId && stillViewingSender) {
+        setActiveChat(conversationId);
+        syncChatUrl(conversationId);
+      }
+
+      if (contentType.includes("text/plain") && res.body && assistantStreamId) {
+        const streamWriter = createThrottledStreamWriter((snapshot) => {
+          setMessages((prev) =>
+            prev.map((m) => (m.id === assistantStreamId ? { ...m, content: snapshot } : m)),
+          );
+        });
+
+        await consumeTextStream(res.body, (snapshot) => streamWriter.push(snapshot));
+        streamWriter.flush();
+
+        if (conversationId && stillViewingSender) {
+          await new Promise((r) => setTimeout(r, 400));
+          await loadConversation(conversationId);
+        }
+      } else if (!contentType.includes("text/plain")) {
+        const raw = await res.text();
+        let data: { conversationId?: string; context?: ContextHints } = {};
+        try {
+          data = raw ? JSON.parse(raw) : {};
+        } catch {
+          throw new Error("服务器响应格式异常，请刷新后重试");
+        }
+
+        if (data.context) {
+          setLastContextHints(data.context);
+        }
+
+        const jsonConversationId = data.conversationId ?? conversationId;
+        if (jsonConversationId && sessionKey === NEW_CHAT_KEY) {
+          unmarkGenerating(NEW_CHAT_KEY);
+          markGenerating(jsonConversationId);
+          abortControllersRef.current.delete(NEW_CHAT_KEY);
+          abortControllersRef.current.set(jsonConversationId, controller);
+          sessionKey = jsonConversationId;
+        }
+
+        const stillViewingJson =
+          activeChatRef.current === chatAtStart ||
+          (chatAtStart === null && activeChatRef.current === null) ||
+          (jsonConversationId != null && activeChatRef.current === jsonConversationId);
+
+        if (jsonConversationId && stillViewingJson) {
+          setActiveChat(jsonConversationId);
+          syncChatUrl(jsonConversationId);
+          await loadConversation(jsonConversationId);
+        }
       }
 
       await loadChats(activeGroup);
@@ -632,7 +1011,9 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
       const msg = err instanceof Error ? err.message : "发送失败";
       if (stillViewingSender) {
         setErrorHint(msg);
-        setMessages((prev) => prev.filter((m) => !m.id.startsWith("temp-")));
+        setMessages((prev) =>
+          prev.filter((m) => !m.id.startsWith("temp-") && !m.id.startsWith("stream-")),
+        );
       }
       if (
         msg.includes("余额") ||
@@ -859,6 +1240,20 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
 
       {/* 主聊天区 */}
       <div className="flex-1 flex flex-col h-screen bg-white relative">
+        <WorkspaceBar
+          answerModes={answerModes}
+          sceneTemplates={sceneTemplates}
+          projects={projects}
+          answerModeSlug={answerModeSlug}
+          sceneTemplateSlug={sceneTemplateSlug}
+          activeProjectId={activeProjectId}
+          contextHints={lastContextHints}
+          onAnswerModeChange={setAnswerModeSlug}
+          onSceneTemplateChange={setSceneTemplateSlug}
+          onProjectChange={setActiveProjectId}
+          onOpenProfile={() => setModal("profile")}
+          onOpenProjects={() => setModal("projects")}
+        />
         <div ref={chatScrollRef} className="flex-1 overflow-y-auto px-4 py-6 sm:px-6 lg:px-8">
           {!activeChat && messages.length === 0 && !loadingConversation ? (
             <div className="h-full flex flex-col items-center justify-center text-center max-w-2xl mx-auto w-full px-6">
@@ -894,36 +1289,52 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
                 <p className="text-center text-sm text-gray-400 py-8">加载对话中...</p>
               )}
               {messages.map((msg, index) => (
-                <div key={msg.id} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
-                  {msg.role === "assistant" && (
-                    <div className="w-8 h-8 rounded-full bg-indigo-600 flex items-center justify-center mr-3 mt-1 text-white text-[10px] font-bold flex-shrink-0">
-                      ai
-                    </div>
-                  )}
-                  <div className={`max-w-[80%] ${msg.role === "user" ? "flex flex-col items-end" : ""}`}>
+                <div
+                  key={msg.id}
+                  className={`${msg.role === "user" ? "flex justify-end" : "w-full group"}`}
+                >
+                  <div
+                    className={
+                      msg.role === "user"
+                        ? "max-w-[85%] sm:max-w-[80%] flex flex-col items-end"
+                        : "w-full min-w-0"
+                    }
+                  >
                     <div
                       className={
                         msg.role === "user"
                           ? "bg-gray-100 px-5 py-3.5 rounded-2xl rounded-tr-sm"
                           : msg.contentType === "text"
-                            ? "bg-gray-100 px-5 py-3.5 rounded-2xl rounded-tl-sm"
-                            : ""
+                            ? "w-full py-1"
+                            : "w-full"
                       }
                     >
                       {msg.attachments && msg.attachments.length > 0 && (
-                        <div className={`flex flex-wrap gap-2 ${msg.content ? "mb-3" : ""}`}>
+                        <div className={`flex flex-col gap-2 ${msg.content ? "mb-3" : ""}`}>
                           {msg.attachments.map((att) =>
                             att.kind === "image" ? (
-                              <a
-                                key={att.id}
-                                href={att.url}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="block rounded-lg overflow-hidden border border-gray-200"
-                              >
-                                {/* eslint-disable-next-line @next/next/no-img-element */}
-                                <img src={att.url} alt={att.name} className="max-h-40 max-w-[200px] object-cover" />
-                              </a>
+                              <div key={att.id} className="flex flex-col items-end">
+                                {att.name === "蒙版预览" ? (
+                                  <span className="text-[11px] text-gray-400 mb-1">蒙版预览</span>
+                                ) : null}
+                                <a
+                                  href={att.url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="block rounded-lg overflow-hidden border border-gray-200"
+                                >
+                                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                                  <img
+                                    src={att.url}
+                                    alt={att.name}
+                                    className={
+                                      att.name === "蒙版预览"
+                                        ? "max-h-64 max-w-[min(100%,420px)] w-auto object-contain bg-gray-50"
+                                        : "max-h-40 max-w-[200px] object-cover"
+                                    }
+                                  />
+                                </a>
+                              </div>
                             ) : (
                               <div
                                 key={att.id}
@@ -938,17 +1349,40 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
                       )}
                       {msg.contentType === "image" && msg.imageUrl ? (
                         <div className="border rounded-2xl overflow-hidden shadow-sm">
-                          {/* eslint-disable-next-line @next/next/no-img-element */}
-                          <img src={msg.imageUrl} alt={msg.content} className="w-full max-h-[400px] object-cover" />
-                          <div className="p-4 flex items-center justify-between bg-gray-50">
+                          <button
+                            type="button"
+                            onClick={() => !isActiveChatGenerating && setImageEditorUrl(msg.imageUrl!)}
+                            disabled={isActiveChatGenerating}
+                            className="block w-full text-left group disabled:cursor-wait"
+                            title="点击放大并编辑"
+                          >
+                            {/* eslint-disable-next-line @next/next/no-img-element */}
+                            <img
+                              src={msg.imageUrl}
+                              alt={msg.content}
+                              className="w-full max-h-[min(70vh,520px)] object-contain bg-gray-100 group-hover:opacity-95 transition-opacity"
+                            />
+                            <p className="px-3 py-1.5 text-xs text-center text-gray-400 bg-gray-50 border-t border-gray-100 group-hover:text-indigo-500">
+                              点击放大 · 涂抹区域后可输入修改说明
+                            </p>
+                          </button>
+                          <div className="p-4 flex items-center justify-between bg-gray-50 border-t border-gray-100">
                             <p className="text-sm text-gray-500 truncate flex-1 mr-4">{msg.content}</p>
-                            <a href={msg.imageUrl} download className="flex items-center gap-1.5 text-sm text-indigo-600 border bg-white px-3 py-1.5 rounded-lg">
+                            <a
+                              href={msg.imageUrl}
+                              download
+                              onClick={(e) => e.stopPropagation()}
+                              className="flex items-center gap-1.5 text-sm text-indigo-600 border bg-white px-3 py-1.5 rounded-lg"
+                            >
                               <Download size={14} /> 下载
                             </a>
                           </div>
                         </div>
                       ) : msg.role === "assistant" ? (
-                        <MarkdownMessage content={msg.content || "..."} />
+                        <AssistantMarkdown
+                          content={msg.content}
+                          streaming={isStreamingMessage(msg)}
+                        />
                       ) : (
                         <div className="whitespace-pre-wrap leading-relaxed text-[15px] text-gray-800">
                           {msg.content}
@@ -978,8 +1412,8 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
                         </button>
                       </div>
                     )}
-                    {msg.role === "assistant" && (
-                      <div className="flex items-center gap-1 mt-1.5 ml-1">
+                    {msg.role === "assistant" && !isStreamingMessage(msg) && (
+                      <div className="flex items-center gap-0.5 mt-2 sm:opacity-0 sm:group-hover:opacity-100 sm:focus-within:opacity-100 transition-opacity">
                         <button
                           type="button"
                           onClick={() =>
@@ -990,20 +1424,20 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
                                 : msg.content || "",
                             )
                           }
-                          className="flex items-center gap-1 px-2 py-1 text-xs text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-md transition-colors"
+                          className="flex items-center gap-1 px-2 py-1.5 text-xs text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-colors"
                           title="复制回答"
                         >
-                          {copiedId === msg.id ? <Check size={13} /> : <Copy size={13} />}
+                          {copiedId === msg.id ? <Check size={14} /> : <Copy size={14} />}
                           {copiedId === msg.id ? "已复制" : "复制"}
                         </button>
                         <button
                           type="button"
                           onClick={() => handleRegenerate(index)}
                           disabled={isActiveChatGenerating}
-                          className="flex items-center gap-1 px-2 py-1 text-xs text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-md transition-colors disabled:opacity-40"
+                          className="flex items-center gap-1 px-2 py-1.5 text-xs text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-colors disabled:opacity-40"
                           title="重新生成"
                         >
-                          <RefreshCw size={13} />
+                          <RefreshCw size={14} />
                           重新生成
                         </button>
                       </div>
@@ -1011,14 +1445,31 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
                   </div>
                 </div>
               ))}
-              {isActiveChatGenerating && (
-                <div className="flex justify-start">
-                  <div className="w-8 h-8 rounded-full bg-indigo-600 flex items-center justify-center mr-3 mt-1 text-white text-[10px] font-bold flex-shrink-0">
-                    ai
-                  </div>
-                  <div className="max-w-[80%] bg-gray-100 px-5 py-3.5 rounded-2xl rounded-tl-sm">
-                    <span className="animate-pulse text-[15px] text-gray-500">正在思考...</span>
-                  </div>
+              {showGeneratingPlaceholder && (
+                <div className="w-full py-1">
+                  <span className="animate-pulse text-[15px] text-gray-500">
+                    {generatingMeta?.kind === "image" ? "正在生图" : "正在思考"}
+                    …
+                    {generatingMeta && generatingMeta.elapsed > 0
+                      ? `（${generatingMeta.elapsed}s）`
+                      : ""}
+                  </span>
+                  {generatingMeta?.kind === "image" && (
+                    <p className="mt-2 text-xs text-gray-400 leading-relaxed">
+                      {generatingMeta.elapsed >= 120 ? (
+                        <>
+                          QuickRouter 图生图上游仍无响应（{generatingMeta.elapsed}s）。
+                          可点下方停止取消；超过 4 分钟会自动超时退款。
+                        </>
+                      ) : (
+                        <>
+                          图生图通常需 1–4 分钟，QuickRouter 上游偶发更慢。F12 网络里
+                          <code className="mx-1 rounded bg-gray-200/80 px-1">/api/chat</code>
+                          为 Pending 即仍在等待。
+                        </>
+                      )}
+                    </p>
+                  )}
                 </div>
               )}
               <div ref={messagesEndRef} />
@@ -1085,7 +1536,13 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
                       <FileText size={16} className="text-indigo-500" />
                     )}
                     <span className="max-w-[120px] truncate text-gray-600">{att.file.name}</span>
-                    {att.uploading && <span className="text-gray-400">上传中</span>}
+                    {att.compressing && <span className="text-gray-400">压缩中</span>}
+                    {!att.compressing && att.uploading && (
+                      <span className="text-gray-400">上传中</span>
+                    )}
+                    {!att.compressing && !att.uploading && att.uploaded && (
+                      <span className="text-green-600">已就绪</span>
+                    )}
                     {att.error && <span className="text-red-500">{att.error}</span>}
                     <button
                       type="button"
@@ -1160,7 +1617,30 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
         </div>
       </div>
 
+      {imageEditorUrl ? (
+        <ImageEditorModal
+          imageUrl={imageEditorUrl}
+          onClose={() => setImageEditorUrl(null)}
+          onSubmit={handleImageEditSubmit}
+          submitting={isActiveChatGenerating}
+        />
+      ) : null}
+
       {/* 弹窗 */}
+      <Modal isOpen={modal === "profile"} onClose={() => setModal(null)} title="用户画像">
+        <ProfilePanel onClose={() => setModal(null)} />
+      </Modal>
+
+      <Modal isOpen={modal === "projects"} onClose={() => setModal(null)} title="项目与记忆">
+        <ProjectPanel
+          projects={projects}
+          activeProjectId={activeProjectId}
+          onProjectsChange={loadWorkspaceData}
+          onSelectProject={setActiveProjectId}
+          onClose={() => setModal(null)}
+        />
+      </Modal>
+
       <Modal isOpen={modal === "recharge"} onClose={() => setModal(null)} title="充值说明">
         <p className="text-sm text-gray-600 leading-relaxed">
           当前为人工充值模式。如需增加点数，请联系管理员并提供您的注册邮箱。管理员确认后将为您增加余额。
@@ -1175,6 +1655,7 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
                 <th className="py-2">时间</th>
                 <th>类型</th>
                 <th>消耗</th>
+                <th>耗时</th>
                 <th>状态</th>
               </tr>
             </thead>
@@ -1184,7 +1665,23 @@ export function UserApp({ initialConversationId }: { initialConversationId?: str
                   <td className="py-2">{r.time}</td>
                   <td>{r.type}</td>
                   <td>{r.cost}</td>
-                  <td>{r.status}</td>
+                  <td>{r.duration || "—"}</td>
+                  <td>
+                    <span
+                      className={
+                        r.status === "进行中"
+                          ? "text-amber-600"
+                          : r.status === "失败" || r.status === "已退款"
+                            ? "text-red-600"
+                            : ""
+                      }
+                    >
+                      {r.status}
+                    </span>
+                    {r.error ? (
+                      <span className="block text-xs text-gray-400 mt-0.5">{r.error}</span>
+                    ) : null}
+                  </td>
                 </tr>
               ))}
             </tbody>

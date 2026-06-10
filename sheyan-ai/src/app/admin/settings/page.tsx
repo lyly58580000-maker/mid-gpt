@@ -11,12 +11,18 @@ const LABELS: Record<string, string> = {
   text_charge_points: "文本扣点",
   image_charge_points: "生图扣点",
   register_welcome_points: "新用户注册赠送",
+  api_cost_cny_per_1k_tokens: "每千Token API成本(元)",
+  api_cost_image_cny: "单次生图 API 成本(元)",
+  quickrouter_recharge_discount: "QuickRouter充值折扣(0.99=9.9折)",
 };
 
 const NUMERIC_KEYS = new Set([
   "text_charge_points",
   "image_charge_points",
   "register_welcome_points",
+  "api_cost_cny_per_1k_tokens",
+  "api_cost_image_cny",
+  "quickrouter_recharge_discount",
 ]);
 
 export default function SettingsPage() {
@@ -43,7 +49,10 @@ export default function SettingsPage() {
   };
 
   const saveNumber = async (key: string, value: string) => {
-    const n = Math.max(0, Math.floor(Number(value) || 0));
+    const isDecimal = key.includes("cny") || key.includes("discount");
+    const n = isDecimal
+      ? Math.max(0, Number(value) || 0)
+      : Math.max(0, Math.floor(Number(value) || 0));
     await fetch("/api/admin/settings", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
@@ -65,12 +74,15 @@ export default function SettingsPage() {
               <input
                 type="number"
                 min={0}
+                step={c.configKey.includes("cny") || c.configKey.includes("discount") ? "0.0001" : "1"}
                 defaultValue={c.configValue}
                 key={`${c.configKey}-${c.configValue}`}
                 onBlur={(e) => saveNumber(c.configKey, e.target.value)}
-                className="w-20 px-2 py-1 text-sm border rounded-lg text-right"
+                className="w-24 px-2 py-1 text-sm border rounded-lg text-right"
               />
-              <span className="text-sm text-gray-500">点</span>
+              <span className="text-sm text-gray-500">
+                {c.configKey.includes("discount") ? "系数" : c.configKey.includes("cny") ? "元" : "点"}
+              </span>
             </div>
           ) : (
             <button
